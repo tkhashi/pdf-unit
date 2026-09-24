@@ -79,23 +79,23 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 - **埋め込み画像**:
   - Form XObject 内の画像も含めて抽出します
   - 回転なしで置かれた画像は透過マスク適用済みの見た目を、回転・せん断された画像は生の画素を四隅に合わせて変形して描画します
-- **サムネイル**: 線検出を行わず、PDFium で元PDFを出力幅160px前後に縮小描画したものです。一覧の表示範囲に入ったページを含む10ページ単位のバッチで、1バッチずつ、本体ページの読み込みが終わってから取得します(同じバッチは重複して要求しません)
+- **サムネイル**: 線検出を行わず、PDFium で元PDFを出力幅160px前後に縮小描画したものです。一覧の表示範囲に入ったページを含む10ページ単位のバッチで、1バッチずつ、本体ページの読み込みが終わってから取得します(同じバッチは重複して要求しません)。バッチを切り出したPDFが送信上限を超える場合は半分ずつに分けて送り、1ページでも超える場合はそのサムネイルを斜線の「表示できません」表示にします
 
 ## API
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
 | GET | `/` | UI(`static/index.html`) |
-| POST | `/api/documents/info` | 文書情報。`{pages: [{width, height}]}` |
-| POST | `/api/thumbs?start=&count=&width=` | サムネイル。`start` ページから `count` ページ分(1〜10)、幅60〜400px。`{thumbs: [{page, png_base64}]}` |
-| POST | `/api/pages/{n}/lines` | 抽出結果。`{linewidth_scale, calibration, lines, texts, images}` |
-| POST | `/api/pages/{n}/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
-| POST | `/api/pages/{n}/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
+| POST | `/api/thumbs?width=` | サムネイル。ボディのPDFの全ページ(最大10)、幅60〜400px。`{thumbs: [{page, png_base64}]}`(`page` は送ったPDF内でのページ番号) |
+| POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
+| POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
+| POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
+| GET | `/vendor/pdf-lib.min.js` | UIが使う同梱ライブラリ(`static/vendor/` を配信。`index.html` からは相対パス `vendor/` で参照) |
 
-サーバーはステートレスで、PDFを保存せず、キャッシュも持ちません。`GET /` 以外のAPIはすべて POST で、リクエストボディにPDFの生バイト列(`Content-Type: application/pdf`)をそのまま送ります。UIは選択したPDFをブラウザ上に保持し、APIを呼ぶたびに送り直します(ADR 0019)。
+サーバーはステートレスで、PDFを保存せず、キャッシュも持ちません。`GET` 以外のAPIはすべて POST で、リクエストボディにPDFの生バイト列(`Content-Type: application/pdf`)を送ります。UIは開いたPDFをブラウザ上に保持し、[pdf-lib](https://github.com/Hopding/pdf-lib) で**必要なページだけを切り出したPDF**(`/api/page/*` は1ページ、`/api/thumbs` は最大10ページ)を送ります。`/api/page/*` のサーバーは送られたPDFの先頭ページを処理します(ADR 0019, 0020)。ページの寸法(一覧の枠・図面の枠)は UI が pdf-lib で求め、`/api/page/lines` の `page` で答え合わせします。
 
-- ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIはPDFを開いたときに1度だけ計算して使い回します
-- PDFの上限は 4MB(4 × 1024 × 1024 バイト)です。UIは送信前にエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
+- ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIは切り出したPDFごとに計算し、1ページ分の切り出し結果は直近6ページ分を使い回します
+- 1回に送るPDF(切り出したページ)の上限は 4MB(4 × 1024 × 1024 バイト)です。PDF全体の大きさには上限がありません。UIは超過するページを送らずにエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
 - 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
 - ページ・画像番号が範囲外の場合は 404 を返します
 
@@ -108,6 +108,7 @@ src/pdf_unit/
   raster.py        埋め込み画像の抽出(PDFium)、座標変換
   calibration.py   線幅補正(ClassifierArchDrawingByJev から移植)
   static/index.html  UI(HTML/CSS/JS 1ファイル、ビルド不要)
+  static/vendor/     同梱ライブラリ(pdf-lib 1.17.1、MIT)
 docs/adr/          設計判断の記録
 ```
 
@@ -119,5 +120,6 @@ docs/adr/          設計判断の記録
 - フォント名が UTF-8 以外(Shift_JIS 等)で書かれたPDFでは、属性パネルのフォント名が `b'...\x82l...'` のように表示されます(対応方針は [ADR 0014](docs/adr/0014-font-name-encoding.md))
 - 部分埋め込みフォントで文字の対応情報(ToUnicode・フォント内の cmap)が削られている場合、何の文字かを復元できず「□」で表示されます(CID が元フォントのグリフ番号のため。元フォントがあれば復元できる見込みがあります: ADR 0018)
 - 線数の多い大判図面では、ページの読み込みに十数秒かかることがあります(キャッシュを持たないため、同じページを開き直すたびに抽出します)
-- 4MBを超えるPDFは開けません(Lambda のリクエスト上限による)
+- 1ページだけで 4MB を超えるページ(大きな埋め込み画像を含むページなど)は処理できません(Lambda のリクエスト上限による)。PDF全体の大きさは問いません
+- 暗号化されたPDFは開けません(pdf-lib が読み込めないため)
 - 原本画像は、応答サイズの上限により要求より低い解像度になる場合があります(拡大時に粗く見えることがあります)

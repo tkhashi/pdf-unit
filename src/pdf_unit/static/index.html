@@ -71,6 +71,7 @@
   .thumb:hover { background: #e5e7eb; }
   .thumb.current { border-color: #2563eb; background: #bfdbfe; }
   .thumb img { width: 140px; display: block; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); }
+  .thumb.unavailable img { background: repeating-linear-gradient(45deg, #f3f4f6 0 6px, #e5e7eb 6px 12px); }
   #viewport.dragging { cursor: grabbing; }
   #viewport.dropover { outline: 3px dashed #2563eb; outline-offset: -8px; }
   #empty {
@@ -129,6 +130,8 @@
   <div id="info"></div>
 </div>
 </div>
+<!-- ページ単位のPDF切り出し用(同梱。static/vendor/README.md)。index.html と同じ場所の vendor/ を相対パスで参照する -->
+<script src="vendor/pdf-lib.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const viewport = $("viewport"), stage = $("stage"), img = $("pageImage");
@@ -153,10 +156,12 @@ const MIN_DRAW_PX = 0.75;   // ベクター描画時の最小線幅(画面px)
 const CELL = 8;             // 空間インデックスのセルサイズ(pt)
 const MAX_SCALE = 400;
 const CLICK_SLOP_PX = 4;
-// Lambda の同期呼び出しの上限(6MB)と関数URLのbase64化(4/3倍)から決めたPDFサイズ上限。サーバーと同じ値
-const MAX_PDF_BYTES = 4 * 1024 * 1024;
+// 1回に送るPDF(切り出したページ)の上限。Lambda の同期呼び出しの上限(6MB)と関数URLのbase64化(4/3倍)から
+// 決めた値でサーバーと同じ。PDF全体の大きさには制限が無い(必要なページだけを送るため。ADR 0020)
+const MAX_SEND_BYTES = 4 * 1024 * 1024;
+const PAGE_PDF_CACHE = 6;  // 切り出した1ページPDFを使い回す件数(同じページの線データ・原本画像・埋め込み画像で共用)
 
-let doc = null;       // {filename, pages, bytes, sha256}(PDF本体はブラウザで保持し、毎回サーバーへ送る。ADR 0019)
+let doc = null;       // {filename, pdf: PDFDocument, pages: [{width, height}], pageCache: Map}(PDF本体はブラウザで保持)
 let currentPage = 0;  // 表示中のページ(0始まり)
 let items = [];       // 線(line/rect/curve)と文字(text)を通し番号で保持
 let lwScale = 1;      // 報告linewidth→実描画太さの補正係数
@@ -304,7 +309,8 @@ function prepare(data) {
     const el = new Image();
     el.onload = () => requestRender();
     const target = doc;
-    apiPost(`/api/pages/${pageNo}/images/${im.index}`)
+    pageBody(pageNo)
+      .then((body) => apiPost(`/api/page/images/${im.index}`, body))
       .then((r) => { if (doc === target) el.src = pngDataUrl(r.png_base64); })
       .catch(() => {});
     items.push({ ...im, id: items.length, el });
@@ -701,17 +707,24 @@ function hoverAtMouse() {
 }
 
 // ---- API ----
-// サーバーはステートレスで、全APIにPDFの生バイト列をPOSTする。CloudFront(OAC)→Lambda関数URLでは
-// POSTのボディのSHA-256を x-amz-content-sha256 ヘッダーで渡す必要があるため、読み込み時に1度だけ計算して使い回す
+// サーバーはステートレス。開いたPDFから必要なページだけを pdf-lib で切り出したPDFをPOSTする(ADR 0019, 0020)。
+// CloudFront(OAC)→Lambda関数URLでは POST のボディのSHA-256を x-amz-content-sha256 ヘッダーで渡す必要があるため、
+// 切り出したPDFごとに計算して一緒に持つ
 class ApiError extends Error {
   constructor(status, detail) { super(detail); this.status = status; }
 }
 
-async function apiPost(path, target = doc) {
+const mb = (n) => (n / 1024 / 1024).toFixed(1);
+
+async function apiPost(path, body) {
+  if (body.bytes.length > MAX_SEND_BYTES) {
+    // 送っても 413 になるので送信しない
+    throw new ApiError(413, `このページはデータが大きく(${mb(body.bytes.length)}MB、上限${mb(MAX_SEND_BYTES)}MB)処理できません`);
+  }
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/pdf", "x-amz-content-sha256": target.sha256 },
-    body: target.bytes,
+    headers: { "Content-Type": "application/pdf", "x-amz-content-sha256": body.sha256 },
+    body: body.bytes,
   });
   if (!res.ok) {
     let detail = `${res.status}`;
@@ -726,22 +739,45 @@ async function sha256Hex(bytes) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// 指定ページだけを含むPDFを作る。そのページが参照するフォント・画像と、親から引き継ぐ属性(Resources・
+// MediaBox・CropBox・Rotate)だけが入る
+async function extractPages(target, indices) {
+  const out = await PDFLib.PDFDocument.create();
+  for (const page of await out.copyPages(target.pdf, indices)) out.addPage(page);
+  const bytes = await out.save({ useObjectStreams: false });
+  return { bytes, sha256: await sha256Hex(bytes) };
+}
+
+// 1ページ分の切り出しは直近 PAGE_PDF_CACHE 件を使い回す(同時の要求でも1回だけ作るよう Promise を持つ)
+function pageBody(n, target = doc) {
+  const cache = target.pageCache;
+  let p = cache.get(n);
+  if (p) { cache.delete(n); cache.set(n, p); return p; }
+  p = extractPages(target, [n]);
+  p.catch(() => cache.delete(n));
+  cache.set(n, p);
+  while (cache.size > PAGE_PDF_CACHE) cache.delete(cache.keys().next().value);
+  return p;
+}
+
+// pdfplumber の page.width/height と同じ定義: CropBox(無ければMediaBox)の幅・高さ。/Rotate 90/270 なら入れ替える
+function pageSize(page) {
+  const box = page.getCropBox();
+  const rot = ((page.getRotation().angle % 360) + 360) % 360;
+  return rot === 90 || rot === 270 ? { width: box.height, height: box.width } : { width: box.width, height: box.height };
+}
+
 const pngDataUrl = (b64) => `data:image/png;base64,${b64}`;
 
 // ---- ページ読み込み ----
 async function upload(file) {
-  if (file.size > MAX_PDF_BYTES) {
-    setStatus(`エラー: PDFが大きすぎます(${(file.size / 1024 / 1024).toFixed(1)}MB、上限4MB)`);
-    return;
-  }
   setStatus("読み込み中...");
   let next;
   try {
-    const bytes = await file.arrayBuffer();
-    next = { filename: file.name, bytes, sha256: await sha256Hex(bytes) };
-    next.pages = (await apiPost("/api/documents/info", next)).pages;
+    const pdf = await PDFLib.PDFDocument.load(await file.arrayBuffer(), { updateMetadata: false });
+    next = { filename: file.name, pdf, pages: pdf.getPages().map(pageSize), pageCache: new Map() };
   } catch (e) {
-    setStatus(`エラー: ${e.message}`);
+    setStatus(e instanceof PDFLib.EncryptedPDFError ? "エラー: 暗号化されたPDFは開けません" : `エラー: PDFを読み込めません(${e.message})`);
     return;
   }
   doc = next;
@@ -811,21 +847,42 @@ function pumpThumbs() {
 async function loadThumbBatch(batch, width) {
   const target = doc;
   const aside = $("thumbs");
+  const start = batch * THUMB_BATCH;
+  const indices = [...Array(Math.min(THUMB_BATCH, target.pages.length - start)).keys()].map((i) => start + i);
   thumbActive++;
   try {
-    const r = await apiPost(`/api/thumbs?start=${batch * THUMB_BATCH}&count=${THUMB_BATCH}&width=${width}`, target);
+    await loadThumbs(target, indices, width);
     if (doc !== target) return;
-    for (const t of r.thumbs) {
-      const b = aside.children[t.page];
-      if (!b) continue;
-      b.querySelector("img").src = pngDataUrl(t.png_base64);
-      visibleThumbs.delete(b);
-      thumbObserver.unobserve(b);
-    }
+    for (const i of indices) { visibleThumbs.delete(aside.children[i]); thumbObserver.unobserve(aside.children[i]); }
   } catch {
     if (doc === target) requestedBatches.delete(batch);  // 失敗したバッチは次に見えたとき再要求する
   } finally {
     if (doc === target) { thumbActive--; pumpThumbs(); }
+  }
+}
+
+// 指定ページを1つのPDFに切り出して送る。送信上限を超える場合は半分ずつに分けて送り直し、
+// 1ページでも超える場合はそのサムネイルを「表示できません」にする
+async function loadThumbs(target, indices, width) {
+  const body = await extractPages(target, indices);
+  if (body.bytes.length > MAX_SEND_BYTES) {
+    if (indices.length === 1) {
+      if (doc !== target) return;
+      const b = $("thumbs").children[indices[0]];
+      b.classList.add("unavailable");
+      setTip(b, `${indices[0] + 1}ページ(データが大きく${mb(body.bytes.length)}MB、サムネイルを表示できません)`);
+      return;
+    }
+    const half = Math.ceil(indices.length / 2);
+    await loadThumbs(target, indices.slice(0, half), width);
+    await loadThumbs(target, indices.slice(half), width);
+    return;
+  }
+  const r = await apiPost(`/api/thumbs?width=${width}`, body);
+  if (doc !== target) return;
+  for (const t of r.thumbs) {
+    const b = $("thumbs").children[indices[t.page]];  // t.page は送ったPDF内でのページ番号
+    if (b) b.querySelector("img").src = pngDataUrl(t.png_base64);
   }
 }
 
@@ -871,7 +928,7 @@ async function showPage(n) {
   mainLoading = true;
   let data;
   try {
-    data = await apiPost(`/api/pages/${n}/lines`);
+    data = await apiPost("/api/page/lines", await pageBody(n));
   } catch (e) {
     if (request === pageRequest) setStatus(`エラー: ${e.message}`);
     return;
@@ -879,6 +936,14 @@ async function showPage(n) {
     if (request === pageRequest) { mainLoading = false; pumpThumbs(); }
   }
   if (request !== pageRequest) return;
+  // 座標系の基準はサーバー(pdfplumber)の寸法。pdf-libで求めた寸法と食い違えば合わせる
+  const size = doc.pages[n];
+  if (Math.abs(size.width - data.page.width) > 0.01 || Math.abs(size.height - data.page.height) > 0.01) {
+    doc.pages[n] = { ...data.page };
+    stage.style.width = `${data.page.width}px`;
+    stage.style.height = `${data.page.height}px`;
+    fit();
+  }
   prepare(data);
   const counts = items.reduce((acc, it) => (acc[it.type] = (acc[it.type] || 0) + 1, acc), {});
   renderLegend(counts);
@@ -973,7 +1038,8 @@ function updateImage() {
   // 要求した段階を記録する。サーバーが応答サイズ上限のため解像度を下げて返しても、同じ段階を再要求しない
   currentRes = res;
   const target = doc, page = currentPage;
-  apiPost(`/api/pages/${page}/image?resolution=${res}`, target)
+  pageBody(page, target)
+    .then((body) => apiPost(`/api/page/image?resolution=${res}`, body))
     .then((r) => {
       // 古いページ・低い解像度の応答で、より高い解像度の画像を上書きしない
       if (doc !== target || currentPage !== page || r.resolution <= imageRes) return;

@@ -1,6 +1,6 @@
 # ADR 0019: AWS Lambda で動かすため、サーバーをステートレスにし、PDFを毎回リクエストで送る
 
-- ステータス: 採用([0001](0001-tech-stack.md) のPDF保存方式と、[0013](0013-page-thumbnails.md) のサムネイルAPI・キャッシュを置き換え)
+- ステータス: 採用([0001](0001-tech-stack.md) のPDF保存方式と、[0013](0013-page-thumbnails.md) のサムネイルAPI・キャッシュを置き換え。PDF全体の送信と4MBの全体上限は [0020](0020-send-only-needed-pages.md) で変更)
 - 日付: 2026-09-25
 
 ## コンテキスト
