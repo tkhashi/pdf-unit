@@ -623,7 +623,11 @@ function describe(it) {
     `<div class="row${active ? " active" : ""}"><span class="label">${label}:</span> ${value}` +
     `${active ? `  (${selection.members.length}件)` : ""}</div>`;
   const rows = [];
-  if (isText(it)) rows.push(row("text", esc(it.text)));
+  if (isText(it)) {
+    rows.push(row("text", esc(it.text)));
+    // フォントに文字の対応情報が無く、何の文字か分からないものは「□」で表示している
+    if (it.unreadable) rows.push(row("読めない文字", `${it.unreadable}字(□で表示。フォントに文字の対応情報が無い)`));
+  }
   levels.forEach(([label, key], i) => {
     const value = key(it);
     if (value === null) return;

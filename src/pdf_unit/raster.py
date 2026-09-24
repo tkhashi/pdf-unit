@@ -53,7 +53,7 @@ _ROTATE_TRANSPOSE = {
 }
 
 
-class _PageToDisplay:
+class PageToDisplay:
     """PDF座標 → pdfplumberと同じ表示座標(top原点、ページ回転・MediaBox原点を反映)への写像。"""
 
     def __init__(self, page: pdfium.PdfPage) -> None:
@@ -84,7 +84,7 @@ def extract_page_images(pdf_path: Path, page_no: int) -> PageImages:
     pdf = pdfium.PdfDocument(pdf_path)
     try:
         page = pdf[page_no]
-        to_display = _PageToDisplay(page)
+        to_display = PageToDisplay(page)
         rotation = page.get_rotation()
         for obj, forms in _iter_images(page):
             pdf_corners = [_to_page(p, forms) for p in obj.get_quad_points()]

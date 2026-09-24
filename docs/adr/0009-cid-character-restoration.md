@@ -1,6 +1,6 @@
 # ADR 0009: `(cid:N)` と出る文字は PDFium の文字解釈で補完する
 
-- ステータス: 採用
+- ステータス: 採用(突き合わせの座標と CID=Unicode の判定方法は [0018](0018-cid-restoration-rotation-and-validation.md) で変更)
 - 日付: 2026-09-24
 
 ## コンテキスト

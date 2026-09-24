@@ -17,6 +17,8 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 from pdfplumber.utils import extract_words
 
+from .raster import PageToDisplay
+
 
 class LineRecord(TypedDict):
     id: int
@@ -178,6 +180,7 @@ class TextRecord(TypedDict):
     size: float | None
     color: str | None
     chars: list[CharGlyph]
+    unreadable: int  # 復元できず「□」で表示している文字の数
 
 
 def _font_size(char: dict[str, Any]) -> float | None:
@@ -227,6 +230,19 @@ def _glyph(char: dict[str, Any], page_height: float) -> CharGlyph | None:
 
 _CID_RE = re.compile(r"\(cid:(\d+)\)")
 _ORIGIN_DECIMALS = 1
+# 復元できなかった文字の表示。本物の「□」と区別するため、文字には unreadable フラグも付ける
+UNREADABLE_CHAR = "□"
+# CID を Unicode とみなしてよいかの判定: フォント内の文字がこの割合以上「よく使われる文字」なら採用
+_PLAUSIBLE_RATIO = 0.9
+# よく使われる文字の範囲(ASCII・ラテン・ギリシャ・キリル・記号・かな・CJK統合漢字・ハングル・全角)
+_COMMON_RANGES = (
+    (0x0020, 0x024F), (0x0370, 0x04FF), (0x2000, 0x27BF), (0x3000, 0x30FF),
+    (0x3200, 0x33FF), (0x4E00, 0x9FFF), (0xAC00, 0xD7AF), (0xF900, 0xFAFF), (0xFF00, 0xFFEF),
+)
+
+
+def _is_common(code: int) -> bool:
+    return any(lo <= code <= hi for lo, hi in _COMMON_RANGES)
 
 
 def _origin_key(x: float, y: float) -> tuple[float, float]:
@@ -234,11 +250,17 @@ def _origin_key(x: float, y: float) -> tuple[float, float]:
 
 
 def _pdfium_chars_by_origin(pdf_path: Path, page_no: int) -> dict[tuple[float, float], str]:
-    """PDFiumが解釈した各文字のUnicodeを、文字原点(PDF座標)をキーに引けるようにする。"""
+    """PDFiumが解釈した各文字のUnicodeを、文字原点の表示座標(pdfplumberと同じ左上原点・回転反映後)で引けるようにする。
+
+    PDFiumの文字原点は回転前のPDF座標なので、/Rotate のあるページでは pdfplumber と一致しない。
+    埋め込み画像と同じ PageToDisplay で表示座標へ変換してから登録する。
+    """
     result: dict[tuple[float, float], str] = {}
     pdf = pdfium.PdfDocument(pdf_path)
     try:
-        textpage = pdf[page_no].get_textpage()
+        page = pdf[page_no]
+        to_display = PageToDisplay(page)
+        textpage = page.get_textpage()
         x, y = ctypes.c_double(), ctypes.c_double()
         for i in range(textpage.count_chars()):
             if pdfium_c.FPDFText_IsGenerated(textpage.raw, i) == 1:
@@ -246,7 +268,7 @@ def _pdfium_chars_by_origin(pdf_path: Path, page_no: int) -> dict[tuple[float, f
             code = pdfium_c.FPDFText_GetUnicode(textpage.raw, i)
             if code in (0, 0xFFFE, 0xFFFF) or not pdfium_c.FPDFText_GetCharOrigin(textpage.raw, i, x, y):
                 continue
-            result.setdefault(_origin_key(x.value, y.value), chr(code))
+            result.setdefault(_origin_key(*to_display((x.value, y.value))), chr(code))
     finally:
         pdf.close()
     return result
@@ -261,41 +283,47 @@ def _lookup(table: dict[tuple[float, float], str], x: float, y: float) -> str | 
     return None
 
 
-def _restore_cid_chars(chars: list[dict[str, Any]], pdf_path: Path, page_no: int) -> list[dict[str, Any]]:
+def _restore_cid_chars(
+    chars: list[dict[str, Any]], pdf_path: Path, page_no: int, page_height: float
+) -> list[dict[str, Any]]:
     """pdfminerが`(cid:N)`としか出せなかった文字(ToUnicode CMapの無いフォント)を補完する。
 
-    1. PDFiumの文字解釈(フォント内部のcmap等のフォールバックを持つ)を文字原点で引き当てる
-    2. 引き当てられない文字は、同じフォントで引き当てた文字がすべて chr(CID) と一致する
-       (=CIDがUnicodeそのものの)フォントに限り chr(CID) で補う
+    1. PDFiumの文字解釈を文字原点で突き合わせ、PDFiumが chr(CID) 以外の文字を返したものはそれを採用する
+       (PDFiumがフォント内部のcmap等から実際に対応を見つけた場合)
+    2. PDFiumが chr(CID) を返した文字や突き合わせられない文字は根拠が無い(PDFium自身もCIDをそのまま
+       Unicodeとみなしているだけ)。フォント単位で、chr(CID) の大半がよく使われる文字に収まる場合だけ
+       CID=Unicode のフォントとみなして chr(CID) を使う
+    3. それ以外は復元できない文字として「□」にし、unreadable フラグを付ける
     """
     cids = [(i, int(m.group(1))) for i, c in enumerate(chars) if (m := _CID_RE.fullmatch(c["text"]))]
     if not cids:
         return chars
     table = _pdfium_chars_by_origin(pdf_path, page_no)
     fixed = list(chars)
-    unresolved: list[tuple[int, int]] = []
-    # フォント名 -> 引き当てた文字がすべて chr(CID) と一致したか
-    cid_is_unicode: dict[str, bool] = {}
+    pending: dict[str, list[tuple[int, int]]] = {}  # フォント名 -> PDFiumで決まらなかった (index, cid)
     for i, cid in cids:
         c = chars[i]
         matrix = c.get("matrix")
-        u = _lookup(table, matrix[4], matrix[5]) if matrix else None
-        if u is None:
-            unresolved.append((i, cid))
-            continue
-        fixed[i] = {**c, "text": u}
-        font = c["fontname"]
-        cid_is_unicode[font] = cid_is_unicode.get(font, True) and u == chr(cid)
-    for i, cid in unresolved:
-        font = chars[i]["fontname"]
-        if cid_is_unicode.get(font, False) and cid < 0x110000:
-            fixed[i] = {**chars[i], "text": chr(cid)}
+        # pdfplumberの matrix(e, f) は回転反映後の下原点座標なので、上原点へ直して突き合わせる
+        u = _lookup(table, matrix[4], page_height - matrix[5]) if matrix else None
+        if u is not None and u != chr(cid):
+            fixed[i] = {**c, "text": u}
+        else:
+            pending.setdefault(c["fontname"], []).append((i, cid))
+    for font_chars in pending.values():
+        codes = [cid for _, cid in font_chars]
+        plausible = sum(_is_common(cid) for cid in codes) >= _PLAUSIBLE_RATIO * len(codes)
+        for i, cid in font_chars:
+            if plausible and _is_common(cid):
+                fixed[i] = {**chars[i], "text": chr(cid)}
+            else:
+                fixed[i] = {**chars[i], "text": UNREADABLE_CHAR, "unreadable": True}
     return fixed
 
 
 def extract_page_texts(page: pdfplumber.page.Page, pdf_path: Path, page_no: int) -> list[TextRecord]:
     """文字を単語単位にまとめる。フォント・サイズ・色が変わる箇所では別単語に分ける。"""
-    chars = _restore_cid_chars(page.chars, pdf_path, page_no)
+    chars = _restore_cid_chars(page.chars, pdf_path, page_no, page.height)
     words = extract_words(
         chars, extra_attrs=["fontname", "size", "non_stroking_color"], return_chars=True
     )
@@ -313,6 +341,7 @@ def extract_page_texts(page: pdfplumber.page.Page, pdf_path: Path, page_no: int)
                 "size": round(w["size"], 2) if w.get("size") else None,
                 "color": _color_to_css(w.get("non_stroking_color")),
                 "chars": glyphs,
+                "unreadable": sum(1 for c in w["chars"] if c.get("unreadable")),
             }
         )
     return records
