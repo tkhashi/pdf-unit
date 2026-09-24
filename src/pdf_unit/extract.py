@@ -9,7 +9,6 @@ from __future__ import annotations
 import ctypes
 import math
 import re
-from pathlib import Path
 from typing import Any, TypedDict
 
 import pdfplumber
@@ -249,14 +248,14 @@ def _origin_key(x: float, y: float) -> tuple[float, float]:
     return (round(x, _ORIGIN_DECIMALS), round(y, _ORIGIN_DECIMALS))
 
 
-def _pdfium_chars_by_origin(pdf_path: Path, page_no: int) -> dict[tuple[float, float], str]:
+def _pdfium_chars_by_origin(pdf_data: bytes, page_no: int) -> dict[tuple[float, float], str]:
     """PDFiumが解釈した各文字のUnicodeを、文字原点の表示座標(pdfplumberと同じ左上原点・回転反映後)で引けるようにする。
 
     PDFiumの文字原点は回転前のPDF座標なので、/Rotate のあるページでは pdfplumber と一致しない。
     埋め込み画像と同じ PageToDisplay で表示座標へ変換してから登録する。
     """
     result: dict[tuple[float, float], str] = {}
-    pdf = pdfium.PdfDocument(pdf_path)
+    pdf = pdfium.PdfDocument(pdf_data)
     try:
         page = pdf[page_no]
         to_display = PageToDisplay(page)
@@ -284,7 +283,7 @@ def _lookup(table: dict[tuple[float, float], str], x: float, y: float) -> str | 
 
 
 def _restore_cid_chars(
-    chars: list[dict[str, Any]], pdf_path: Path, page_no: int, page_height: float
+    chars: list[dict[str, Any]], pdf_data: bytes, page_no: int, page_height: float
 ) -> list[dict[str, Any]]:
     """pdfminerが`(cid:N)`としか出せなかった文字(ToUnicode CMapの無いフォント)を補完する。
 
@@ -298,7 +297,7 @@ def _restore_cid_chars(
     cids = [(i, int(m.group(1))) for i, c in enumerate(chars) if (m := _CID_RE.fullmatch(c["text"]))]
     if not cids:
         return chars
-    table = _pdfium_chars_by_origin(pdf_path, page_no)
+    table = _pdfium_chars_by_origin(pdf_data, page_no)
     fixed = list(chars)
     pending: dict[str, list[tuple[int, int]]] = {}  # フォント名 -> PDFiumで決まらなかった (index, cid)
     for i, cid in cids:
@@ -321,9 +320,9 @@ def _restore_cid_chars(
     return fixed
 
 
-def extract_page_texts(page: pdfplumber.page.Page, pdf_path: Path, page_no: int) -> list[TextRecord]:
+def extract_page_texts(page: pdfplumber.page.Page, pdf_data: bytes, page_no: int) -> list[TextRecord]:
     """文字を単語単位にまとめる。フォント・サイズ・色が変わる箇所では別単語に分ける。"""
-    chars = _restore_cid_chars(page.chars, pdf_path, page_no, page.height)
+    chars = _restore_cid_chars(page.chars, pdf_data, page_no, page.height)
     words = extract_words(
         chars, extra_attrs=["fontname", "size", "non_stroking_color"], return_chars=True
     )

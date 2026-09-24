@@ -153,13 +153,16 @@ const MIN_DRAW_PX = 0.75;   // ベクター描画時の最小線幅(画面px)
 const CELL = 8;             // 空間インデックスのセルサイズ(pt)
 const MAX_SCALE = 400;
 const CLICK_SLOP_PX = 4;
+// Lambda の同期呼び出しの上限(6MB)と関数URLのbase64化(4/3倍)から決めたPDFサイズ上限。サーバーと同じ値
+const MAX_PDF_BYTES = 4 * 1024 * 1024;
 
-let doc = null;       // {doc_id, filename, pages}
+let doc = null;       // {filename, pages, bytes, sha256}(PDF本体はブラウザで保持し、毎回サーバーへ送る。ADR 0019)
 let currentPage = 0;  // 表示中のページ(0始まり)
 let items = [];       // 線(line/rect/curve)と文字(text)を通し番号で保持
 let lwScale = 1;      // 報告linewidth→実描画太さの補正係数
 let view = { x: 0, y: 0, scale: 1 };
-let currentRes = 0;
+let currentRes = 0;   // 要求済みの解像度段階(RESOLUTIONSの値)
+let imageRes = 0;     // 実際に受け取った原本画像の解像度(サーバーが応答サイズ上限のため下げる場合がある)
 let hovered = -1;
 let mouse = null;     // 最後のカーソル位置(viewport座標)
 let drag = null;
@@ -300,7 +303,10 @@ function prepare(data) {
   for (const im of data.images) {
     const el = new Image();
     el.onload = () => requestRender();
-    el.src = `/api/documents/${doc.doc_id}/pages/${pageNo}/images/${im.index}.png`;
+    const target = doc;
+    apiPost(`/api/pages/${pageNo}/images/${im.index}`)
+      .then((r) => { if (doc === target) el.src = pngDataUrl(r.png_base64); })
+      .catch(() => {});
     items.push({ ...im, id: items.length, el });
   }
 
@@ -694,14 +700,51 @@ function hoverAtMouse() {
   setHover(pick((mouse.x - view.x) / view.scale, (mouse.y - view.y) / view.scale));
 }
 
+// ---- API ----
+// サーバーはステートレスで、全APIにPDFの生バイト列をPOSTする。CloudFront(OAC)→Lambda関数URLでは
+// POSTのボディのSHA-256を x-amz-content-sha256 ヘッダーで渡す必要があるため、読み込み時に1度だけ計算して使い回す
+class ApiError extends Error {
+  constructor(status, detail) { super(detail); this.status = status; }
+}
+
+async function apiPost(path, target = doc) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/pdf", "x-amz-content-sha256": target.sha256 },
+    body: target.bytes,
+  });
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try { detail = (await res.json()).detail ?? detail; } catch {}
+    throw new ApiError(res.status, detail);
+  }
+  return res.json();
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const pngDataUrl = (b64) => `data:image/png;base64,${b64}`;
+
 // ---- ページ読み込み ----
 async function upload(file) {
-  const form = new FormData();
-  form.append("file", file);
-  setStatus("アップロード中...");
-  const res = await fetch("/api/documents", { method: "POST", body: form });
-  if (!res.ok) { setStatus(`エラー: ${(await res.json()).detail}`); return; }
-  doc = await res.json();
+  if (file.size > MAX_PDF_BYTES) {
+    setStatus(`エラー: PDFが大きすぎます(${(file.size / 1024 / 1024).toFixed(1)}MB、上限4MB)`);
+    return;
+  }
+  setStatus("読み込み中...");
+  let next;
+  try {
+    const bytes = await file.arrayBuffer();
+    next = { filename: file.name, bytes, sha256: await sha256Hex(bytes) };
+    next.pages = (await apiPost("/api/documents/info", next)).pages;
+  } catch (e) {
+    setStatus(`エラー: ${e.message}`);
+    return;
+  }
+  doc = next;
   document.body.classList.add("loaded");
   $("docName").textContent = doc.filename;
   setTip($("docName"), doc.filename);
@@ -713,17 +756,22 @@ async function upload(file) {
 }
 
 // ---- ページ一覧(サムネイル) ----
+// サムネイルは10ページ単位のバッチで要求する(1回のPOSTでPDFを送る回数を減らすため)
 const THUMB_WIDTH = 140;
-const THUMB_CONCURRENCY = 2;
+const THUMB_BATCH = 10;
+const THUMB_CONCURRENCY = 1;
 let thumbObserver = null;
 const visibleThumbs = new Set();  // 表示範囲内でまだ読み込んでいないサムネイル
-let thumbActive = 0;              // 読込中のサムネイル数
+const requestedBatches = new Set(); // 要求済み(読込中・読込済み)のバッチ番号
+let thumbActive = 0;              // 読込中のバッチ数
 let mainLoading = false;          // 本体ページの線データ取得中はサムネイル要求を控える(サーバー側はPDFium処理が直列)
 
 function buildThumbs() {
   const aside = $("thumbs");
   aside.replaceChildren();
   visibleThumbs.clear();
+  requestedBatches.clear();
+  thumbActive = 0;
   thumbObserver?.disconnect();
   thumbObserver = new IntersectionObserver((entries) => {
     for (const e of entries) e.isIntersecting ? visibleThumbs.add(e.target) : visibleThumbs.delete(e.target);
@@ -751,12 +799,33 @@ function pumpThumbs() {
   const width = Math.min(400, Math.round(THUMB_WIDTH * (window.devicePixelRatio || 1)));
   for (const b of visibleThumbs) {
     if (mainLoading || thumbActive >= THUMB_CONCURRENCY) return;
+    // 監視は読み込み成功時に解除する(失敗したバッチは、再び表示範囲に入ったとき再要求される)
     visibleThumbs.delete(b);
-    thumbObserver.unobserve(b);
-    const im = b.querySelector("img");
-    thumbActive++;
-    im.onload = im.onerror = () => { thumbActive--; pumpThumbs(); };
-    im.src = `/api/documents/${doc.doc_id}/pages/${b.dataset.page}/thumb.png?width=${width}`;
+    const batch = Math.floor(Number(b.dataset.page) / THUMB_BATCH);
+    if (requestedBatches.has(batch)) continue;  // 同じバッチを重複して要求しない
+    requestedBatches.add(batch);
+    loadThumbBatch(batch, width);
+  }
+}
+
+async function loadThumbBatch(batch, width) {
+  const target = doc;
+  const aside = $("thumbs");
+  thumbActive++;
+  try {
+    const r = await apiPost(`/api/thumbs?start=${batch * THUMB_BATCH}&count=${THUMB_BATCH}&width=${width}`, target);
+    if (doc !== target) return;
+    for (const t of r.thumbs) {
+      const b = aside.children[t.page];
+      if (!b) continue;
+      b.querySelector("img").src = pngDataUrl(t.png_base64);
+      visibleThumbs.delete(b);
+      thumbObserver.unobserve(b);
+    }
+  } catch {
+    if (doc === target) requestedBatches.delete(batch);  // 失敗したバッチは次に見えたとき再要求する
+  } finally {
+    if (doc === target) { thumbActive--; pumpThumbs(); }
   }
 }
 
@@ -793,6 +862,8 @@ async function showPage(n) {
   items = []; strokeBatches = []; buildIndex();
   hovered = -1; clearSelection(); renderInfo();
   currentRes = 0;
+  imageRes = 0;
+  img.removeAttribute("src");
   fit();
   markCurrentThumb(n);
 
@@ -800,9 +871,10 @@ async function showPage(n) {
   mainLoading = true;
   let data;
   try {
-    const res = await fetch(`/api/documents/${doc.doc_id}/pages/${n}/lines`);
-    if (!res.ok) { if (request === pageRequest) setStatus(`エラー: ${res.status}`); return; }
-    data = await res.json();
+    data = await apiPost(`/api/pages/${n}/lines`);
+  } catch (e) {
+    if (request === pageRequest) setStatus(`エラー: ${e.message}`);
+    return;
   } finally {
     if (request === pageRequest) { mainLoading = false; pumpThumbs(); }
   }
@@ -898,8 +970,17 @@ function updateImage() {
   const need = 72 * view.scale * (window.devicePixelRatio || 1);
   const res = RESOLUTIONS.find((r) => r >= need) ?? RESOLUTIONS[RESOLUTIONS.length - 1];
   if (res <= currentRes) return;
+  // 要求した段階を記録する。サーバーが応答サイズ上限のため解像度を下げて返しても、同じ段階を再要求しない
   currentRes = res;
-  img.src = `/api/documents/${doc.doc_id}/pages/${currentPage}/image.png?resolution=${res}`;
+  const target = doc, page = currentPage;
+  apiPost(`/api/pages/${page}/image?resolution=${res}`, target)
+    .then((r) => {
+      // 古いページ・低い解像度の応答で、より高い解像度の画像を上書きしない
+      if (doc !== target || currentPage !== page || r.resolution <= imageRes) return;
+      imageRes = r.resolution;
+      img.src = pngDataUrl(r.png_base64);
+    })
+    .catch(() => { if (doc === target && currentPage === page && currentRes === res) currentRes = 0; });
 }
 
 function applyView() {

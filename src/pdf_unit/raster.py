@@ -9,7 +9,6 @@ from __future__ import annotations
 import ctypes
 import io
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TypedDict
 
 import pypdfium2 as pdfium
@@ -78,10 +77,10 @@ def _iter_images(page: pdfium.PdfPage, form=None, forms: list[pdfium.PdfMatrix] 
             yield from _iter_images(page, obj, [*forms, obj.get_matrix()], level + 1)
 
 
-def extract_page_images(pdf_path: Path, page_no: int) -> PageImages:
+def extract_page_images(pdf_data: bytes, page_no: int) -> PageImages:
     records: list[ImageRecord] = []
     pngs: list[bytes] = []
-    pdf = pdfium.PdfDocument(pdf_path)
+    pdf = pdfium.PdfDocument(pdf_data)
     try:
         page = pdf[page_no]
         to_display = PageToDisplay(page)

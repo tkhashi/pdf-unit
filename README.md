@@ -1,6 +1,6 @@
 # PDF Unit
 
-PDF(主に建築図面)をアップロードすると、pdfplumber / PDFium で検出した線・文字・埋め込み画像を種類別に色分けして再描画し、マウスオーバーやクリックで個々の要素や同じ属性を持つ要素群をハイライトできるローカル用Webアプリです。
+PDF(主に建築図面)を開くと、pdfplumber / PDFium で検出した線・文字・埋め込み画像を種類別に色分けして再描画し、マウスオーバーやクリックで個々の要素や同じ属性を持つ要素群をハイライトできるWebアプリです。ローカルでも、AWS Lambda 上でも(ステートレスなサーバーとして)動作します。
 
 検出結果が元のPDFとどれだけ一致しているかを目視で確かめる用途を想定しており、元のPDFを描画した「原本」画像を薄く下敷きにして重ねて表示します(検出されなかった要素は原本の灰色として見えます)。
 
@@ -13,7 +13,9 @@ uv sync
 uv run pdf-unit
 ```
 
-ブラウザで http://127.0.0.1:8000 を開き、PDFをドラッグ&ドロップするか「開く」から選択します。ローカル環境での利用を前提としており、サーバーは `127.0.0.1` のみで待ち受けます。
+ブラウザで http://127.0.0.1:8000 を開き、PDFをドラッグ&ドロップするか「開く」から選択します。`uv run pdf-unit` はサーバーを `127.0.0.1` のみで待ち受けます。
+
+AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Adapter + `uvicorn pdf_unit.server:app` として実行します(インフラ定義は別リポジトリ。方針は [ADR 0019](docs/adr/0019-aws-deployment.md))。
 
 ## 画面構成
 
@@ -77,26 +79,31 @@ uv run pdf-unit
 - **埋め込み画像**:
   - Form XObject 内の画像も含めて抽出します
   - 回転なしで置かれた画像は透過マスク適用済みの見た目を、回転・せん断された画像は生の画素を四隅に合わせて変形して描画します
-- **サムネイル**: 線検出を行わず、PDFium で元PDFを出力幅160px前後に縮小描画したものです。一覧の表示範囲に入ったものだけを、同時2件まで、本体ページの読み込みが終わってから取得します
+- **サムネイル**: 線検出を行わず、PDFium で元PDFを出力幅160px前後に縮小描画したものです。一覧の表示範囲に入ったページを含む10ページ単位のバッチで、1バッチずつ、本体ページの読み込みが終わってから取得します(同じバッチは重複して要求しません)
 
 ## API
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
 | GET | `/` | UI(`static/index.html`) |
-| POST | `/api/documents` | PDFアップロード(multipart `file`)。`{doc_id, filename, pages: [{width, height}]}` |
-| GET | `/api/documents/{doc_id}/pages/{n}/lines` | 抽出結果。`{linewidth_scale, calibration, lines, texts, images}` |
-| GET | `/api/documents/{doc_id}/pages/{n}/image.png?resolution=` | 原本画像(36〜600dpi) |
-| GET | `/api/documents/{doc_id}/pages/{n}/images/{k}.png` | 埋め込み画像 k の画像データ |
-| GET | `/api/documents/{doc_id}/pages/{n}/thumb.png?width=` | サムネイル(幅60〜400px) |
+| POST | `/api/documents/info` | 文書情報。`{pages: [{width, height}]}` |
+| POST | `/api/thumbs?start=&count=&width=` | サムネイル。`start` ページから `count` ページ分(1〜10)、幅60〜400px。`{thumbs: [{page, png_base64}]}` |
+| POST | `/api/pages/{n}/lines` | 抽出結果。`{linewidth_scale, calibration, lines, texts, images}` |
+| POST | `/api/pages/{n}/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
+| POST | `/api/pages/{n}/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
 
-アップロードしたPDFは起動時に作る一時ディレクトリ(`pdf-unit-*`)に保存し、文書IDとの対応はメモリ上に保持します(サーバーを再起動すると失われます)。抽出結果・画像はページ単位でキャッシュします。
+サーバーはステートレスで、PDFを保存せず、キャッシュも持ちません。`GET /` 以外のAPIはすべて POST で、リクエストボディにPDFの生バイト列(`Content-Type: application/pdf`)をそのまま送ります。UIは選択したPDFをブラウザ上に保持し、APIを呼ぶたびに送り直します(ADR 0019)。
+
+- ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIはPDFを開いたときに1度だけ計算して使い回します
+- PDFの上限は 4MB(4 × 1024 × 1024 バイト)です。UIは送信前にエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
+- 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
+- ページ・画像番号が範囲外の場合は 404 を返します
 
 ## ファイル構成
 
 ```
 src/pdf_unit/
-  server.py        FastAPIアプリ、API、キャッシュ、PDFium直列化ロック
+  server.py        FastAPIアプリ(ステートレス)、API、PDF検証、応答サイズ調整、PDFium直列化ロック
   extract.py       線・文字の抽出(pdfplumber)、cid文字補完、フォントサイズ逆算
   raster.py        埋め込み画像の抽出(PDFium)、座標変換
   calibration.py   線幅補正(ClassifierArchDrawingByJev から移植)
@@ -111,4 +118,6 @@ docs/adr/          設計判断の記録
 - 再描画の文字は sans-serif で描くため、元のフォントとは字形・字幅が異なります
 - フォント名が UTF-8 以外(Shift_JIS 等)で書かれたPDFでは、属性パネルのフォント名が `b'...\x82l...'` のように表示されます(対応方針は [ADR 0014](docs/adr/0014-font-name-encoding.md))
 - 部分埋め込みフォントで文字の対応情報(ToUnicode・フォント内の cmap)が削られている場合、何の文字かを復元できず「□」で表示されます(CID が元フォントのグリフ番号のため。元フォントがあれば復元できる見込みがあります: ADR 0018)
-- 線数の多い大判図面では、初回のページ読み込みに十数秒かかることがあります
+- 線数の多い大判図面では、ページの読み込みに十数秒かかることがあります(キャッシュを持たないため、同じページを開き直すたびに抽出します)
+- 4MBを超えるPDFは開けません(Lambda のリクエスト上限による)
+- 原本画像は、応答サイズの上限により要求より低い解像度になる場合があります(拡大時に粗く見えることがあります)
