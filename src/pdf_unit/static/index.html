@@ -1,0 +1,919 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>PDF Line Viewer</title>
+<style>
+  :root { --bar: #1f2328; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #e5e7eb; }
+  /* ヘッダーの高さが項目数で変わっても表示領域が追従し、スクロールバーが出ないよう縦flexにする */
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  header {
+    display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 6px 12px;
+    background: var(--bar); color: #fff; font-size: 13px; flex: none;
+  }
+  header > * { white-space: nowrap; }
+  header #legend, header #status { white-space: normal; }
+  #help {
+    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border-radius: 50%; background: #374151; border: 1px solid #4b5563; cursor: help; font-weight: bold;
+  }
+  header .spacer { flex: 1; }
+  header button, header select, header label.file {
+    background: #374151; color: #fff; border: 1px solid #4b5563; border-radius: 4px;
+    padding: 4px 10px; font-size: 13px; cursor: pointer;
+  }
+  header input[type=file] { display: none; }
+  header button.active { background: #2563eb; border-color: #3b82f6; }
+  header input[type=range] { width: 80px; vertical-align: middle; }
+  #legend label { margin-right: 8px; cursor: pointer; }
+  #legend .swatch { display: inline-block; width: 12px; height: 4px; vertical-align: middle; margin: 0 3px; }
+  #main { flex: 1; min-height: 0; display: flex; }
+  #viewport { position: relative; flex: 1; min-width: 0; overflow: hidden; cursor: crosshair; }
+  #thumbs {
+    flex: none; width: 192px; overflow-y: auto; overflow-x: hidden; background: #d1d5db; padding: 8px;
+    display: flex; flex-direction: column; align-items: center; gap: 8px; border-right: 1px solid #9ca3af;
+  }
+  #thumbs[hidden] { display: none; }
+  .thumb {
+    background: none; border: 2px solid transparent; border-radius: 4px; padding: 4px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: #374151;
+    scroll-margin: 8px;  /* 選択ページへ追従スクロールした時に端へ貼り付かないよう余白を残す */
+  }
+  .thumb:hover { background: #e5e7eb; }
+  .thumb.current { border-color: #2563eb; background: #bfdbfe; }
+  .thumb img { width: 140px; display: block; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); }
+  #viewport.dragging { cursor: grabbing; }
+  #viewport.dropover { outline: 3px dashed #2563eb; outline-offset: -8px; }
+  #empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #6b7280; font-size: 18px; pointer-events: none;
+  }
+  #stage {
+    position: absolute; left: 0; top: 0; transform-origin: 0 0;
+    background: #fff; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+  }
+  #stage img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; user-select: none; -webkit-user-drag: none; }
+  #viewport canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #info {
+    position: absolute; right: 12px; bottom: 12px; min-width: 260px; max-width: 480px;
+    background: rgba(31, 35, 40, 0.92); color: #fff; font: 12px/1.6 ui-monospace, monospace;
+    padding: 8px 10px; border-radius: 6px; pointer-events: none; white-space: pre-wrap;
+  }
+  #info:empty { display: none; }
+  #info .row { padding: 0 4px; margin: 0 -4px; border-radius: 3px; }
+  #info .row.active { background: #facc15; color: #111827; font-weight: bold; }
+  #info .row .label { color: #9ca3af; }
+  #info .row.active .label { color: #374151; }
+  .chip { display: inline-block; width: 10px; height: 10px; border: 1px solid #fff; vertical-align: middle; }
+</style>
+</head>
+<body>
+<header>
+  <strong>PDF Line Viewer</strong>
+  <label class="file">PDFを開く<input id="file" type="file" accept="application/pdf"></label>
+  <button id="thumbToggle" disabled>サムネイル</button>
+  <select id="page" disabled></select>
+  <button id="fit" disabled>全体表示</button>
+  <label>表示 <select id="mode">
+    <option value="both">両方</option>
+    <option value="vector">ベクター</option>
+    <option value="raster">ラスター</option>
+  </select></label>
+  <span id="legend"></span>
+  <label>原本 <input id="rasterOpacity" type="range" min="0" max="100" value="20"></label>
+  <span id="status"></span>
+  <span class="spacer"></span>
+  <span id="help" title="ホイール: ズーム&#10;ドラッグ: 移動&#10;ホバー: 最も近い線・文字・画像の属性を表示&#10;クリック: 同じ属性の要素をすべて選択(同じ要素を再クリックで属性を切替)&#10;Esc: 選択解除">?</span>
+</header>
+<div id="main">
+<aside id="thumbs" hidden></aside>
+<div id="viewport">
+  <div id="empty">PDFをドラッグ&ドロップ、または「PDFを開く」</div>
+  <div id="stage" hidden><img id="pageImage" alt=""></div>
+  <canvas id="vec"></canvas>
+  <canvas id="hlc"></canvas>
+  <div id="info"></div>
+</div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const viewport = $("viewport"), stage = $("stage"), img = $("pageImage");
+const vecCanvas = $("vec"), hlCanvas = $("hlc");
+const pageSelect = $("page"), statusEl = $("status"), info = $("info");
+
+const TYPE_COLORS = { line: "#2563eb", rect: "#16a34a", curve: "#c026d3", text: "#ea580c", image: "#64748b" };
+// 面で判定する要素(文字・画像)の優先度ペナルティ(許容距離に対する倍率)。重なる線を優先する
+const AREA_PENALTY = { text: 0.5, image: 0.75 };
+// 選択中は他の要素を減光し、選択要素は本来の色+黄の縁取り。ホバーは赤(種類色・選択の黄と区別)
+const HOVER_COLOR = "rgba(239, 68, 68, 0.6)";
+const GROUP_COLOR = "rgba(250, 204, 21, 0.85)";
+const DIM_ALPHA = 0.2;
+const RESOLUTIONS = [100, 200, 400];
+const HIT_PX = 8;           // カーソルから線の縁までの許容距離(画面px)
+const HL_PAD_MIN_PX = 1;    // ハイライトが線の外側にはみ出す幅(画面px、片側)。縮小表示時は細く
+const HL_PAD_MAX_PX = 3;    // 拡大表示時の上限
+const SHAPE_N = 64;         // 形状比較の再標本化点数
+const SHAPE_TOL = 0.03;     // 形状一致とみなす正規化残差(形状サイズ比)
+const MIN_LINEWIDTH = 0.15; // 実描画太さの下限(pt)
+const MIN_DRAW_PX = 0.75;   // ベクター描画時の最小線幅(画面px)
+const CELL = 8;             // 空間インデックスのセルサイズ(pt)
+const MAX_SCALE = 400;
+const CLICK_SLOP_PX = 4;
+
+let doc = null;       // {doc_id, pages}
+let items = [];       // 線(line/rect/curve)と文字(text)を通し番号で保持
+let lwScale = 1;      // 報告linewidth→実描画太さの補正係数
+let view = { x: 0, y: 0, scale: 1 };
+let currentRes = 0;
+let hovered = -1;
+let mouse = null;     // 最後のカーソル位置(viewport座標)
+let drag = null;
+let selection = null; // {anchor, level, members: number[], label, value, history: number[][]}
+const hiddenTypes = new Set();
+let displayMode = "both"; // "both" | "vector" | "raster"(ラスター=PDFに埋め込まれた画像)
+
+// ベクター描画用バッチ(種類×描画太さごとに1つのPath2D)
+let strokeBatches = [];
+// ヒット判定用: 線分 + 空間インデックス(値 >=0: 線分index, <0: -(textId+1))
+let segs = new Float64Array(0);
+let segOwner = new Int32Array(0);
+let grid = new Map();
+let maxHalfWidth = 0;
+
+const isText = (it) => it.type === "text";
+const isImage = (it) => it.type === "image";
+const isArea = (it) => isText(it) || isImage(it);
+const family = (it) => isArea(it) ? it.type : "stroke";
+const isHidden = (type) => hiddenTypes.has(type) ||
+  (displayMode === "vector" && type === "image") || (displayMode === "raster" && type !== "image");
+const effWidth = (lw) => Math.max((lw ?? 0.5) * lwScale, MIN_LINEWIDTH);
+const cellKey = (cx, cy) => cx * 100000 + cy;
+const setStatus = (t) => { statusEl.textContent = t; };
+
+function luminance(css) {
+  const m = css && css.match(/rgb\((\d+),(\d+),(\d+)\)/);
+  if (!m) return null;
+  const [r, g, b] = m.slice(1).map(Number);
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+// 濃淡: 輝度から求めた濃度(0%=白, 100%=黒)を5%刻みで丸める
+function shade(css) {
+  const y = luminance(css);
+  return y === null ? null : `濃度${Math.round((1 - y / 255) * 20) * 5}%`;
+}
+
+// ---- 形状(相似形)比較 ----
+// 折れ線を弧長で等間隔に再標本化し、重心を原点・ノルム1に正規化した複素数列にする。
+function shapeDescriptor(polylines) {
+  const xs = [], ys = [];
+  for (const pl of polylines) for (let i = 0; i < pl.length; i += 2) {
+    const n = xs.length;
+    if (n && xs[n - 1] === pl[i] && ys[n - 1] === pl[i + 1]) continue;
+    xs.push(pl[i]); ys.push(pl[i + 1]);
+  }
+  if (xs.length < 2) return null;
+  const cum = [0];
+  for (let i = 1; i < xs.length; i++) cum.push(cum[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]));
+  const total = cum[cum.length - 1];
+  if (total < 1e-6) return null;
+  const closed = Math.hypot(xs[xs.length - 1] - xs[0], ys[ys.length - 1] - ys[0]) < total * 0.01;
+  const re = new Float64Array(SHAPE_N), im = new Float64Array(SHAPE_N);
+  let j = 0;
+  for (let k = 0; k < SHAPE_N; k++) {
+    // 閉曲線は終点=始点なので周長をN等分、開曲線は両端を含めてN-1等分
+    const t = (total * k) / (closed ? SHAPE_N : SHAPE_N - 1);
+    while (j < cum.length - 2 && cum[j + 1] < t) j++;
+    const seg = cum[j + 1] - cum[j], u = seg > 0 ? Math.min(1, (t - cum[j]) / seg) : 0;
+    re[k] = xs[j] + (xs[j + 1] - xs[j]) * u;
+    im[k] = ys[j] + (ys[j + 1] - ys[j]) * u;
+  }
+  let cx = 0, cy = 0;
+  for (let k = 0; k < SHAPE_N; k++) { cx += re[k]; cy += im[k]; }
+  cx /= SHAPE_N; cy /= SHAPE_N;
+  let norm = 0;
+  for (let k = 0; k < SHAPE_N; k++) { re[k] -= cx; im[k] -= cy; norm += re[k] * re[k] + im[k] * im[k]; }
+  norm = Math.sqrt(norm);
+  if (norm < 1e-9) return null;
+  for (let k = 0; k < SHAPE_N; k++) { re[k] /= norm; im[k] /= norm; }
+  return { re, im, closed };
+}
+
+// 回転+一様拡大の最適当てはめ後の一致度 |<a,b>| (直交プロクラステス, 1で完全一致)。
+// 反転は conj(b)、逆向きは逆順、閉曲線は始点の巡回シフトも試して最大値を返す。
+function shapeScore(a, b) {
+  const N = SHAPE_N, shifts = a.closed ? N : 1;
+  let best = 0;
+  for (let rev = 0; rev < 2; rev++) for (let s = 0; s < shifts; s++) {
+    let r1 = 0, i1 = 0, r2 = 0, i2 = 0;  // Σ a·conj(b), Σ a·b(反転)
+    for (let k = 0; k < N; k++) {
+      const j = a.closed ? (rev ? (s - k + N) % N : (s + k) % N) : (rev ? N - 1 - k : k);
+      const ar = a.re[k], ai = a.im[k], br = b.re[j], bi = b.im[j];
+      r1 += ar * br + ai * bi; i1 += ai * br - ar * bi;
+      r2 += ar * br - ai * bi; i2 += ar * bi + ai * br;
+    }
+    best = Math.max(best, Math.hypot(r1, i1), Math.hypot(r2, i2));
+  }
+  return best;
+}
+
+function sameShape(a, b) {
+  if (!a.shape || !b.shape || a.shape.closed !== b.shape.closed) return false;
+  if (a === b) return true;
+  const score = Math.min(1, shapeScore(a.shape, b.shape));
+  return Math.sqrt(1 - score * score) < SHAPE_TOL;
+}
+
+// ---- クリックで辿る属性(種類ごと) ----
+// [ラベル, 値(該当しなければnull), 一致判定(省略時は値の一致)]
+const STROKE_LEVELS = [
+  ["種類", (it) => it.type],
+  ["linewidth", (it) => it.linewidth === null ? null : String(it.linewidth)],
+  ["長さ", (it) => it.type === "line" ? `${it.length.toFixed(2)}pt` : null],
+  ["形状", (it) => it.type === "curve" && it.shape ? (it.shape.closed ? "閉曲線" : "開曲線") : null, sameShape],
+  ["描画太さ", (it) => `${it.w.toFixed(2)}pt`],
+  ["色", (it) => it.color],
+  ["濃淡", (it) => shade(it.color)],
+];
+const TEXT_LEVELS = [
+  ["種類", (it) => it.type],
+  ["フォント", (it) => it.fontname],
+  ["サイズ", (it) => it.size === null ? null : `${it.size}pt`],
+  ["色", (it) => it.color],
+  ["濃淡", (it) => shade(it.color)],
+];
+const IMAGE_LEVELS = [
+  ["種類", (it) => it.type],
+  ["画素数", (it) => `${it.px_width}×${it.px_height}px`],
+  ["解像度", (it) => `${Math.round(it.dpi)}dpi`],
+  ["圧縮形式", (it) => it.filters.join("+") || "なし"],
+];
+const levelsOf = (it) => isImage(it) ? IMAGE_LEVELS : isText(it) ? TEXT_LEVELS : STROKE_LEVELS;
+
+// ---- データ準備 ----
+function prepare(data) {
+  lwScale = data.linewidth_scale;
+  items = [];
+  for (const ln of data.lines) {
+    let length = 0;
+    for (const pl of ln.polylines)
+      for (let i = 0; i + 3 < pl.length; i += 2) length += Math.hypot(pl[i + 2] - pl[i], pl[i + 3] - pl[i + 1]);
+    const shape = ln.type === "curve" ? shapeDescriptor(ln.polylines) : null;
+    items.push({ ...ln, id: items.length, w: effWidth(ln.linewidth), length, shape, path: new Path2D(ln.d) });
+  }
+  for (const t of data.texts) items.push({ ...t, id: items.length });
+  const pageNo = pageSelect.value;
+  for (const im of data.images) {
+    const el = new Image();
+    el.onload = () => requestRender();
+    el.src = `/api/documents/${doc.doc_id}/pages/${pageNo}/images/${im.index}.png`;
+    items.push({ ...im, id: items.length, el });
+  }
+
+  const batches = new Map();
+  for (const it of items) {
+    if (isArea(it)) continue;
+    const key = `${it.type}|${it.w}`;
+    let b = batches.get(key);
+    if (!b) batches.set(key, b = { type: it.type, w: it.w, path: new Path2D() });
+    b.path.addPath(it.path);
+  }
+  strokeBatches = [...batches.values()];
+  buildIndex();
+}
+
+function addToGrid(x0, y0, x1, y1, value) {
+  const cx0 = Math.floor(Math.min(x0, x1) / CELL), cx1 = Math.floor(Math.max(x0, x1) / CELL);
+  const cy0 = Math.floor(Math.min(y0, y1) / CELL), cy1 = Math.floor(Math.max(y0, y1) / CELL);
+  for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
+    const key = cellKey(cx, cy);
+    let cell = grid.get(key);
+    if (!cell) grid.set(key, cell = []);
+    cell.push(value);
+  }
+}
+
+function buildIndex() {
+  let n = 0;
+  for (const it of items) if (!isArea(it)) for (const pl of it.polylines) n += pl.length / 2 - 1;
+  segs = new Float64Array(n * 4);
+  segOwner = new Int32Array(n);
+  grid = new Map();
+  maxHalfWidth = 0;
+  let k = 0;
+  for (const it of items) {
+    if (isArea(it)) {
+      const [x0, top, x1, bottom] = it.bbox;
+      addToGrid(x0, top, x1, bottom, -(it.id + 1));
+      continue;
+    }
+    maxHalfWidth = Math.max(maxHalfWidth, it.w / 2);
+    for (const pl of it.polylines) {
+      for (let i = 0; i + 3 < pl.length; i += 2, k++) {
+        segs[k * 4] = pl[i]; segs[k * 4 + 1] = pl[i + 1]; segs[k * 4 + 2] = pl[i + 2]; segs[k * 4 + 3] = pl[i + 3];
+        segOwner[k] = it.id;
+        addToGrid(pl[i], pl[i + 1], pl[i + 2], pl[i + 3], k);
+      }
+    }
+  }
+}
+
+// ---- ヒット判定 ----
+function inQuad(px, py, q) {
+  let inside = false;
+  for (let i = 0, j = 3; i < 4; j = i++) {
+    const xi = q[i * 2], yi = q[i * 2 + 1], xj = q[j * 2], yj = q[j * 2 + 1];
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function distPointSeg(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2)) : 0;
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function distToSeg(px, py, k) {
+  return distPointSeg(px, py, segs[k * 4], segs[k * 4 + 1], segs[k * 4 + 2], segs[k * 4 + 3]);
+}
+
+// 四隅の多角形までの距離(内側なら0)。回転画像ではbboxの角が画像外になるため
+function distToQuad(px, py, q) {
+  if (inQuad(px, py, q)) return 0;
+  let d = Infinity;
+  for (let i = 0, j = 3; i < 4; j = i++) d = Math.min(d, distPointSeg(px, py, q[j * 2], q[j * 2 + 1], q[i * 2], q[i * 2 + 1]));
+  return d;
+}
+
+function distToBox(px, py, [x0, top, x1, bottom]) {
+  const dx = Math.max(x0 - px, 0, px - x1), dy = Math.max(top - py, 0, py - bottom);
+  return Math.hypot(dx, dy);
+}
+
+// 候補: 線の縁(描画太さ込み)まで許容距離以内。その中で中心線に最も近いものを選ぶ
+// (描画上重なって見える極細の密集線でも、中心線の近さで1本に決まる)。
+// 文字・画像は枠内でもペナルティを付け、重なる線を優先する(画像は四隅の多角形で判定)。
+function pick(px, py) {
+  const tol = HIT_PX / view.scale;
+  const r = tol + maxHalfWidth;
+  const cx0 = Math.floor((px - r) / CELL), cx1 = Math.floor((px + r) / CELL);
+  const cy0 = Math.floor((py - r) / CELL), cy1 = Math.floor((py + r) / CELL);
+  let best = -1, bestScore = Infinity;
+  for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
+    const cell = grid.get(cellKey(cx, cy));
+    if (!cell) continue;
+    for (const v of cell) {
+      let id, score;
+      if (v < 0) {
+        id = -v - 1;
+        const it = items[id];
+        if (isHidden(it.type)) continue;
+        const d = isImage(it) ? distToQuad(px, py, it.quad) : distToBox(px, py, it.bbox);
+        if (d > tol) continue;
+        score = d + tol * AREA_PENALTY[it.type];
+      } else {
+        id = segOwner[v];
+        const it = items[id];
+        if (isHidden(it.type)) continue;
+        const c = distToSeg(px, py, v);
+        if (c - it.w / 2 > tol) continue;
+        score = c;
+      }
+      if (score < bestScore) { bestScore = score; best = id; }
+    }
+  }
+  return best;
+}
+
+// ---- 描画 ----
+function resizeCanvases() {
+  const dpr = window.devicePixelRatio || 1;
+  for (const c of [vecCanvas, hlCanvas]) {
+    c.width = Math.round(viewport.clientWidth * dpr);
+    c.height = Math.round(viewport.clientHeight * dpr);
+  }
+}
+
+function pageTransform(ctx) {
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y);
+}
+
+function clear(ctx) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+
+// 文字は画面座標で描く(ptのまま極小フォントを拡大すると描画が崩れるため)
+function drawGlyphs(ctx, it) {
+  const dpr = window.devicePixelRatio || 1;
+  for (const g of it.chars) {
+    ctx.setTransform(dpr, 0, 0, dpr, dpr * (view.x + g.x * view.scale), dpr * (view.y + g.y * view.scale));
+    ctx.rotate((g.rotation * Math.PI) / 180);
+    if (g.sx !== 1) ctx.scale(g.sx, 1);
+    ctx.font = `${g.size * view.scale}px sans-serif`;
+    ctx.fillText(g.text, 0, 0);
+  }
+}
+
+// 埋め込み画像: 回転なしはbboxへ、回転・せん断ありは画像の左上/右上/左下を四隅に合わせたアフィン変換で描く
+function drawImageItem(ctx, it) {
+  const el = it.el;
+  if (!el.complete || !el.naturalWidth) return;
+  const [x0, top, x1, bottom] = it.bbox;
+  // 画面上で画像1画素が2px以上に拡大されたら補間せず画素をそのまま見せる
+  ctx.imageSmoothingEnabled = (view.scale * (x1 - x0)) / el.naturalWidth < 2;
+  if (it.placement === "bbox") {
+    ctx.drawImage(el, x0, top, x1 - x0, bottom - top);
+    return;
+  }
+  const q = it.quad;  // 左下, 右下, 右上, 左上
+  const [blx, bly, trx, try_, tlx, tly] = [q[0], q[1], q[4], q[5], q[6], q[7]];
+  const w = el.naturalWidth, h = el.naturalHeight;
+  ctx.save();
+  ctx.transform((trx - tlx) / w, (try_ - tly) / w, (blx - tlx) / h, (bly - tly) / h, tlx, tly);
+  ctx.drawImage(el, 0, 0);
+  ctx.restore();
+}
+
+function drawScene() {
+  const ctx = vecCanvas.getContext("2d");
+  clear(ctx);
+  if (!doc) return;
+  pageTransform(ctx);
+  ctx.globalAlpha = selection ? DIM_ALPHA : 1;
+  if (!isHidden("image")) for (const it of items) if (isImage(it)) drawImageItem(ctx, it);
+  ctx.lineCap = "butt";
+  ctx.lineJoin = "miter";
+  for (const b of strokeBatches) {
+    if (isHidden(b.type)) continue;
+    ctx.strokeStyle = TYPE_COLORS[b.type];
+    ctx.lineWidth = Math.max(b.w, MIN_DRAW_PX / view.scale);
+    ctx.stroke(b.path);
+  }
+  if (!isHidden("text")) {
+    ctx.fillStyle = TYPE_COLORS.text;
+    for (const it of items) if (isText(it)) drawGlyphs(ctx, it);
+  }
+  ctx.globalAlpha = 1;
+}
+
+const hlPad = () => Math.min(HL_PAD_MAX_PX, Math.max(HL_PAD_MIN_PX, view.scale)) / view.scale;
+
+// 四隅(左下・右下・右上・左上)を各辺から d だけ内側へ寄せる(長方形・回転した長方形を想定)
+function insetQuad(q, d) {
+  const ux = q[2] - q[0], uy = q[3] - q[1], vx = q[6] - q[0], vy = q[7] - q[1];
+  const ul = Math.hypot(ux, uy) || 1, vl = Math.hypot(vx, vy) || 1;
+  const [ax, ay, bx, by] = [(ux / ul) * d, (uy / ul) * d, (vx / vl) * d, (vy / vl) * d];
+  return [
+    q[0] + ax + bx, q[1] + ay + by,  // 左下
+    q[2] - ax + bx, q[3] - ay + by,  // 右下
+    q[4] - ax - bx, q[5] - ay - by,  // 右上
+    q[6] + ax - bx, q[7] + ay - by,  // 左上
+  ];
+}
+
+const imageMinSide = (it) => Math.min(
+  Math.hypot(it.quad[2] - it.quad[0], it.quad[3] - it.quad[1]),
+  Math.hypot(it.quad[6] - it.quad[0], it.quad[7] - it.quad[1]));
+
+function highlightItem(ctx, it, color) {
+  const pad = hlPad();
+  if (isImage(it)) {
+    const quadPath = (pts) => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0], pts[1]);
+      for (let i = 2; i < 8; i += 2) ctx.lineTo(pts[i], pts[i + 1]);
+      ctx.closePath();
+    };
+    quadPath(it.quad);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.2;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // 枠線は画像の内側に寄せて描く。隙間なく並んだ画像(分割された写真等)でも
+    // 隣同士の枠が重ならず、1枚ずつ区別できる
+    const w = pad, inset = Math.min(pad * 1.5 + w / 2, imageMinSide(it) / 4);
+    quadPath(insetQuad(it.quad, inset));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = w;
+    ctx.stroke();
+    return;
+  }
+  if (isText(it)) {
+    const [x0, top, x1, bottom] = it.bbox;
+    ctx.fillStyle = color;
+    ctx.fillRect(x0 - pad, top - pad, x1 - x0 + 2 * pad, bottom - top + 2 * pad);
+    return;
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = it.w + 2 * pad;
+  ctx.stroke(it.path);
+}
+
+// グループ選択は描画太さごとにPath2Dをまとめて描く(数千本でもズーム毎に再構築しない)
+let groupBatches = null;
+function buildGroupBatches() {
+  groupBatches = null;
+  if (!selection) return;
+  const strokes = new Map(), areas = [];
+  for (const id of selection.members) {
+    const it = items[id];
+    if (isArea(it)) { areas.push(it); continue; }
+    const key = `${it.type}|${it.w}`;
+    let b = strokes.get(key);
+    if (!b) strokes.set(key, b = { type: it.type, w: it.w, path: new Path2D() });
+    b.path.addPath(it.path);
+  }
+  groupBatches = { strokes: [...strokes.values()], areas };
+}
+
+function drawHighlights() {
+  const ctx = hlCanvas.getContext("2d");
+  clear(ctx);
+  if (!doc) return;
+  pageTransform(ctx);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const pad = hlPad();
+  if (groupBatches) {
+    // 画像は不透明なので先に描き直し、その上に枠を重ねる。
+    // 線・文字は縁取り(黄)を先に描き、その上に減光前の本来の色で描き直す
+    for (const it of groupBatches.areas) if (isImage(it)) drawImageItem(ctx, it);
+    ctx.strokeStyle = GROUP_COLOR;
+    for (const b of groupBatches.strokes) {
+      ctx.lineWidth = b.w + 2 * pad;
+      ctx.stroke(b.path);
+    }
+    for (const it of groupBatches.areas) highlightItem(ctx, it, GROUP_COLOR);
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "miter";
+    for (const b of groupBatches.strokes) {
+      ctx.strokeStyle = TYPE_COLORS[b.type];
+      ctx.lineWidth = Math.max(b.w, MIN_DRAW_PX / view.scale);
+      ctx.stroke(b.path);
+    }
+    ctx.fillStyle = TYPE_COLORS.text;
+    for (const it of groupBatches.areas) if (isText(it)) drawGlyphs(ctx, it);
+    pageTransform(ctx);  // drawGlyphsが画面座標に切り替えるため戻す
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+  }
+  if (hovered >= 0) highlightItem(ctx, items[hovered], HOVER_COLOR);
+}
+
+let renderPending = false;
+function requestRender(vectors = true) {
+  requestRender.vectors ||= vectors;
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => {
+    renderPending = false;
+    if (requestRender.vectors) drawScene();
+    requestRender.vectors = false;
+    drawHighlights();
+  });
+}
+
+// ---- 情報パネル ----
+function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+// 属性行はクリック巡回の属性定義から作る。選択中の属性で、表示中の要素がその集合に含まれれば行をハイライト
+function describe(it) {
+  const [x0, top, x1, bottom] = it.bbox.map((v) => v.toFixed(2));
+  const levels = levelsOf(it);
+  const activeLevel = selection && levelsOf(items[selection.anchor]) === levels && selection.memberSet.has(it.id)
+    ? selection.level : -1;
+  const row = (label, value, active = false) =>
+    `<div class="row${active ? " active" : ""}"><span class="label">${label}:</span> ${value}` +
+    `${active ? `  (${selection.members.length}件)` : ""}</div>`;
+  const rows = [];
+  if (isText(it)) rows.push(row("text", esc(it.text)));
+  levels.forEach(([label, key], i) => {
+    const value = key(it);
+    if (value === null) return;
+    let shown = esc(value);
+    if (label === "種類") shown = `<b style="color:${TYPE_COLORS[it.type]}">${it.type}</b>  #${it.id}`;
+    if (label === "色" && it.color) shown += ` <span class="chip" style="background:${it.color}"></span>`;
+    if (label === "描画太さ") shown += ` (補正×${lwScale})`;
+    rows.push(row(label, shown, i === activeLevel));
+  });
+  if (isImage(it)) rows.push(row("配置", it.placement === "bbox" ? "回転なし" : "回転・変形あり"));
+  rows.push(row("bbox", `(${x0}, ${top}) - (${x1}, ${bottom})`));
+  return rows.join("");
+}
+
+// ホバー中の要素、無ければ選択の起点要素を表示する
+function renderInfo() {
+  const id = hovered >= 0 ? hovered : selection ? selection.anchor : -1;
+  info.innerHTML = id >= 0 ? describe(items[id]) : "";
+}
+
+// ---- 選択(クリックで属性を順に切替) ----
+function sameMembers(a, b) {
+  if (!a || a.length !== b.length) return false;
+  const s = new Set(a);
+  return b.every((id) => s.has(id));
+}
+
+function selectNext(id) {
+  const anchor = items[id];
+  const levels = levelsOf(anchor);
+  const cont = selection && selection.anchor === id;
+  const start = cont ? selection.level + 1 : 0;
+  const history = cont ? selection.history : [];
+  for (let lv = start; lv < levels.length; lv++) {
+    const [label, key, same] = levels[lv];
+    const value = key(anchor);
+    if (value === null) continue;  // この要素には該当しない属性(例: line以外の長さ)
+    const match = same ? (it) => key(it) !== null && same(anchor, it) : (it) => key(it) === value;
+    const members = items
+      .filter((it) => family(it) === family(anchor) && !isHidden(it.type) && match(it))
+      .map((it) => it.id);
+    if (history.some((h) => sameMembers(h, members))) continue;  // 既に選んだ集合と同じになる属性は飛ばす
+    selection = { anchor: id, level: lv, members, memberSet: new Set(members), label, value, history: [...history, members] };
+    buildGroupBatches();
+    return;
+  }
+  clearSelection();
+}
+
+function clearSelection() {
+  selection = null;
+  groupBatches = null;
+}
+
+function setHover(id) {
+  if (id === hovered) return;
+  hovered = id;
+  renderInfo();
+  requestRender(false);
+}
+
+function hoverAtMouse() {
+  if (!doc || !mouse || drag) return;
+  setHover(pick((mouse.x - view.x) / view.scale, (mouse.y - view.y) / view.scale));
+}
+
+// ---- ページ読み込み ----
+async function upload(file) {
+  const form = new FormData();
+  form.append("file", file);
+  setStatus("アップロード中...");
+  const res = await fetch("/api/documents", { method: "POST", body: form });
+  if (!res.ok) { setStatus(`エラー: ${(await res.json()).detail}`); return; }
+  doc = await res.json();
+  pageSelect.innerHTML = doc.pages.map((_, i) => `<option value="${i}">${i + 1} / ${doc.pages.length}</option>`).join("");
+  pageSelect.disabled = $("fit").disabled = $("thumbToggle").disabled = false;
+  document.title = `${doc.filename} - PDF Line Viewer`;
+  buildThumbs();
+  setThumbsVisible(loadThumbsPref());
+  await showPage(0);
+}
+
+// ---- ページ一覧(サムネイル) ----
+const THUMB_WIDTH = 140;
+const THUMB_CONCURRENCY = 2;
+let thumbObserver = null;
+const visibleThumbs = new Set();  // 表示範囲内でまだ読み込んでいないサムネイル
+let thumbActive = 0;              // 読込中のサムネイル数
+let mainLoading = false;          // 本体ページの線データ取得中はサムネイル要求を控える(サーバー側はPDFium処理が直列)
+
+function buildThumbs() {
+  const aside = $("thumbs");
+  aside.replaceChildren();
+  visibleThumbs.clear();
+  thumbObserver?.disconnect();
+  thumbObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) e.isIntersecting ? visibleThumbs.add(e.target) : visibleThumbs.delete(e.target);
+    pumpThumbs();
+  }, { root: aside, rootMargin: "300px 0px" });
+  doc.pages.forEach(({ width, height }, i) => {
+    const b = document.createElement("button");
+    b.className = "thumb";
+    b.dataset.page = i;
+    const im = document.createElement("img");
+    im.alt = `${i + 1}ページ`;
+    im.style.aspectRatio = `${width} / ${height}`;
+    const label = document.createElement("span");
+    label.textContent = i + 1;
+    b.append(im, label);
+    b.addEventListener("click", () => { pageSelect.value = i; showPage(i); });
+    aside.append(b);
+    thumbObserver.observe(b);
+  });
+}
+
+function pumpThumbs() {
+  if (!doc) return;
+  const width = Math.min(400, Math.round(THUMB_WIDTH * (window.devicePixelRatio || 1)));
+  for (const b of visibleThumbs) {
+    if (mainLoading || thumbActive >= THUMB_CONCURRENCY) return;
+    visibleThumbs.delete(b);
+    thumbObserver.unobserve(b);
+    const im = b.querySelector("img");
+    thumbActive++;
+    im.onload = im.onerror = () => { thumbActive--; pumpThumbs(); };
+    im.src = `/api/documents/${doc.doc_id}/pages/${b.dataset.page}/thumb.png?width=${width}`;
+  }
+}
+
+function markCurrentThumb(n) {
+  for (const b of $("thumbs").children) b.classList.toggle("current", Number(b.dataset.page) === n);
+  $("thumbs").children[n]?.scrollIntoView({ block: "nearest" });
+}
+
+function loadThumbsPref() {
+  try { return localStorage.getItem("pdf-unit.thumbs") !== "hidden"; } catch { return true; }
+}
+
+function setThumbsVisible(visible) {
+  $("thumbs").hidden = !visible;
+  $("thumbToggle").classList.toggle("active", visible);
+  try { localStorage.setItem("pdf-unit.thumbs", visible ? "shown" : "hidden"); } catch {}
+  if (visible && doc) markCurrentThumb(Number(pageSelect.value));
+}
+
+let pageRequest = 0;  // ページ連続切替時に、古いページの応答で上書きしないための通し番号
+async function showPage(n) {
+  const request = ++pageRequest;
+  const { width, height } = doc.pages[n];
+  $("empty").hidden = true;
+  stage.hidden = false;
+  stage.style.width = `${width}px`;
+  stage.style.height = `${height}px`;
+  items = []; strokeBatches = []; buildIndex();
+  hovered = -1; clearSelection(); renderInfo();
+  currentRes = 0;
+  fit();
+  markCurrentThumb(n);
+
+  setStatus("抽出中...");
+  mainLoading = true;
+  let data;
+  try {
+    const res = await fetch(`/api/documents/${doc.doc_id}/pages/${n}/lines`);
+    if (!res.ok) { if (request === pageRequest) setStatus(`エラー: ${res.status}`); return; }
+    data = await res.json();
+  } finally {
+    if (request === pageRequest) { mainLoading = false; pumpThumbs(); }
+  }
+  if (request !== pageRequest) return;
+  prepare(data);
+  const counts = items.reduce((acc, it) => (acc[it.type] = (acc[it.type] || 0) + 1, acc), {});
+  renderLegend(counts);
+  setStatus(`線幅補正 ×${lwScale} [${data.calibration}]`);
+  requestRender();
+}
+
+// 表示対象が変わったら、見えなくなった要素を選択・ホバーから外す
+function onVisibilityChange() {
+  if (selection) {
+    selection.members = selection.members.filter((id) => !isHidden(items[id].type));
+    selection.memberSet = new Set(selection.members);
+    if (isHidden(items[selection.anchor].type)) clearSelection();
+  }
+  buildGroupBatches();
+  hovered = -1;
+  renderInfo();
+  requestRender();
+}
+
+function renderLegend(counts) {
+  const legend = $("legend");
+  legend.innerHTML = "";
+  for (const [type, color] of Object.entries(TYPE_COLORS)) {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !hiddenTypes.has(type);
+    cb.addEventListener("change", () => {
+      cb.checked ? hiddenTypes.delete(type) : hiddenTypes.add(type);
+      onVisibilityChange();
+    });
+    label.append(cb);
+    label.insertAdjacentHTML("beforeend", `<span class="swatch" style="background:${color}"></span>${type} ${counts[type] ?? 0}`);
+    legend.append(label);
+  }
+}
+
+// ---- 表示変換 ----
+// 原本画像はズーム量に応じた解像度で読み込む(pt→px = scale * dpr、72dpi基準)
+function updateImage() {
+  if (!doc) return;
+  const need = 72 * view.scale * (window.devicePixelRatio || 1);
+  const res = RESOLUTIONS.find((r) => r >= need) ?? RESOLUTIONS[RESOLUTIONS.length - 1];
+  if (res <= currentRes) return;
+  currentRes = res;
+  img.src = `/api/documents/${doc.doc_id}/pages/${pageSelect.value}/image.png?resolution=${res}`;
+}
+
+function applyView() {
+  stage.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+  updateImage();
+  requestRender();
+}
+
+function fit() {
+  const { width, height } = doc.pages[pageSelect.value];
+  const vw = viewport.clientWidth, vh = viewport.clientHeight, pad = 24;
+  view.scale = Math.min((vw - pad * 2) / width, (vh - pad * 2) / height);
+  view.x = (vw - width * view.scale) / 2;
+  view.y = (vh - height * view.scale) / 2;
+  applyView();
+}
+
+function toViewport(e) {
+  const rect = viewport.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+// ---- イベント ----
+viewport.addEventListener("wheel", (e) => {
+  if (!doc) return;
+  e.preventDefault();
+  const m = toViewport(e);
+  const factor = Math.exp(-e.deltaY * 0.0015);
+  const scale = Math.min(Math.max(view.scale * factor, 0.1), MAX_SCALE);
+  view.x = m.x - (m.x - view.x) * (scale / view.scale);
+  view.y = m.y - (m.y - view.y) * (scale / view.scale);
+  view.scale = scale;
+  applyView();
+  mouse = m;
+  hoverAtMouse();  // 許容距離がズームで変わるため再判定
+}, { passive: false });
+
+viewport.addEventListener("pointerdown", (e) => {
+  if (!doc || e.button !== 0) return;
+  drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
+  viewport.setPointerCapture(e.pointerId);
+});
+
+let movePending = false;
+viewport.addEventListener("pointermove", (e) => {
+  if (drag) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < CLICK_SLOP_PX) return;
+    drag.moved = true;
+    viewport.classList.add("dragging");
+    view.x = drag.vx + dx;
+    view.y = drag.vy + dy;
+    applyView();
+    return;
+  }
+  mouse = toViewport(e);
+  if (!movePending) {
+    movePending = true;
+    requestAnimationFrame(() => { movePending = false; hoverAtMouse(); });
+  }
+});
+
+viewport.addEventListener("pointerup", (e) => {
+  if (!drag) return;
+  const wasClick = !drag.moved;
+  drag = null;
+  viewport.classList.remove("dragging");
+  mouse = toViewport(e);
+  if (wasClick) {
+    const id = pick((mouse.x - view.x) / view.scale, (mouse.y - view.y) / view.scale);
+    if (id >= 0) selectNext(id); else clearSelection();
+    hovered = id;
+    renderInfo();
+    requestRender();  // 選択の有無で背景の減光が変わる
+  } else {
+    hoverAtMouse();
+  }
+});
+viewport.addEventListener("pointercancel", () => { drag = null; viewport.classList.remove("dragging"); });
+viewport.addEventListener("pointerleave", () => { if (!drag) { mouse = null; setHover(-1); } });
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && selection) { clearSelection(); renderInfo(); requestRender(); }
+});
+
+$("mode").addEventListener("change", (e) => { displayMode = e.target.value; onVisibilityChange(); });
+$("rasterOpacity").addEventListener("input", (e) => { img.style.opacity = e.target.value / 100; });
+img.style.opacity = $("rasterOpacity").value / 100;
+$("file").addEventListener("change", (e) => { if (e.target.files[0]) upload(e.target.files[0]); });
+pageSelect.addEventListener("change", () => showPage(Number(pageSelect.value)));
+$("thumbToggle").addEventListener("click", () => setThumbsVisible($("thumbs").hidden));
+$("fit").addEventListener("click", fit);
+window.addEventListener("resize", () => { if (doc) fit(); });
+// ヘッダーの折返し等で表示領域の大きさが変わったら、Canvasの画素バッファを表示サイズに合わせ直す
+// (合わないとCanvasが引き伸ばされて表示され、原本とずれる)
+new ResizeObserver(() => { resizeCanvases(); requestRender(); }).observe(viewport);
+resizeCanvases();
+
+viewport.addEventListener("dragover", (e) => { e.preventDefault(); viewport.classList.add("dropover"); });
+viewport.addEventListener("dragleave", () => viewport.classList.remove("dropover"));
+viewport.addEventListener("drop", (e) => {
+  e.preventDefault();
+  viewport.classList.remove("dropover");
+  const file = e.dataTransfer.files[0];
+  if (file) upload(file);
+});
+</script>
+</body>
+</html>

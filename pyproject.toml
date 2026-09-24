@@ -1,0 +1,25 @@
+[project]
+name = "pdf-unit"
+version = "0.1.0"
+description = "PDFの検出線をホバーでハイライトするローカルビューア"
+readme = "README.md"
+authors = [
+    { name = "tkhashi", email = "pupodenews@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "pdfplumber>=0.11.10",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.53.0",
+]
+
+[project.scripts]
+pdf-unit = "pdf_unit.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+exclude-newer = "7 days"
