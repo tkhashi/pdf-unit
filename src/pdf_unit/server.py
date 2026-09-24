@@ -23,7 +23,7 @@ from .raster import PageImages, extract_page_images
 _STATIC_DIR = Path(__file__).parent / "static"
 _UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="pdf-unit-"))
 
-app = FastAPI(title="pdf-unit")
+app = FastAPI(title="PDF Unit")
 
 # doc_id -> 保存先PDFパス(ローカル用途なのでメモリ保持のみ)
 _documents: dict[str, Path] = {}
