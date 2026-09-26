@@ -16,6 +16,7 @@
 
 ## ブランチと PR
 
+- ファイル操作を伴う作業は必ず `git worktree` で専用の作業ディレクトリを作ってから行う。置き場所は `~/.claude/worktrees/pdf-unit-<branch名>` とし(リポジトリ内の `.claude/worktrees/` や、リポジトリの隣には作らない)、`development` を主ブランチのワークツリーに直接チェックアウトせず、`git worktree add ~/.claude/worktrees/pdf-unit-<branch名> -b <branch名> origin/development` のように `development` から分岐させる。作業が終わってマージしたら、自分が作った worktree とブランチは削除する
 - 作業を始めるときは `development` から `feat-`/`fix-`/`docs-` + 英小文字・数字・ハイフンの名前でブランチを作る(例: `feat-thumbnail-cache`)。`main`・`development` に直接コミット・push しない
 - 作業が終わったら `/pr` skill(`.claude/skills/pr/SKILL.md`)で `development` 向けの PR を作成し、squash マージする
 - `main` へのマージは本番デプロイになる。ユーザーが明示的に指示したときのみ、`gh pr create --base main --head development` → `gh pr merge --merge` で行う
