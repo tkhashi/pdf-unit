@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# UI のビルド成果物(web/ の pnpm build が出力する。CI でビルドして S3 に配置する)
+src/pdf_unit/static/

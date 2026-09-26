@@ -1,6 +1,6 @@
 # ADR 0021: アプリの CI が Lambda のコードと静的ファイルを直接更新し、infra は入れ物だけを作る
 
-- ステータス: 採用
+- ステータス: 採用(動作確認の `GET /vendor/pdf-lib.min.js` は [0029](0029-build-artifacts-and-deploy.md) で `index.html` が参照する `assets/` の確認に置き換え。CI が UI をビルドする手順を追加)
 - 日付: 2026-09-26
 
 ## コンテキスト

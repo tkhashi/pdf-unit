@@ -20,6 +20,8 @@ from typing import Literal
 import pdfplumber
 from PIL import Image
 
+from .timing import metric, stage
+
 VectorRecord = dict  # pdfplumberのオブジェクトdict(object_type, x0, top, linewidth等)をそのまま受け取る
 
 _BACKGROUND_THRESHOLD = 220  # グレースケール明度がこれ以上なら背景(白)とみなす
@@ -85,6 +87,60 @@ def _bbox_overlaps(
     return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
 
 
+# 孤立判定の空間索引(_BBoxGrid)の設定。格子の一辺はページの長辺をこの数で割った長さ
+_GRID_DIVISIONS = 128
+# 多くの格子にまたがるbbox(ページ全体を囲む枠など)は格子に載せず、毎回すべて調べる
+_MAX_CELLS_PER_BBOX = 256
+# 調べる格子がこれより多い範囲の問い合わせは、索引を使わずに総当たりで調べる
+_MAX_QUERY_CELLS = 4096
+
+
+class _BBoxGrid:
+    """bbox の重なり判定を、問い合わせ範囲と同じ格子に載っている bbox だけに絞る索引。
+
+    判定式は総当たりと同じ `_bbox_overlaps` を使い、重なりうる bbox を漏れなく候補に含めるので、結果は
+    総当たりと完全に一致する(ADR 0025)。x 方向で重なる2つの区間には共通の点 x があり、`floor(x / cell)` は
+    単調なので、その点の格子は両方の格子範囲に含まれる(y 方向も同じ)。非有限の座標を含む bbox や格子に
+    載せきれない bbox は、格子を使わずに毎回調べる。
+    """
+
+    def __init__(self, bboxes: list[tuple[float, float, float, float]], cell: float) -> None:
+        self._bboxes = bboxes
+        self._cell = cell
+        self._cells: dict[tuple[int, int], list[tuple[float, float, float, float]]] = defaultdict(list)
+        self._always: list[tuple[float, float, float, float]] = []
+        for bbox in bboxes:
+            r = self._cell_range(bbox)
+            if r is None or (r[2] - r[0] + 1) * (r[3] - r[1] + 1) > _MAX_CELLS_PER_BBOX:
+                self._always.append(bbox)
+                continue
+            for cx in range(r[0], r[2] + 1):
+                for cy in range(r[1], r[3] + 1):
+                    self._cells[(cx, cy)].append(bbox)
+
+    def _cell_range(self, bbox: tuple[float, float, float, float]) -> tuple[int, int, int, int] | None:
+        if not all(math.isfinite(v) for v in bbox):
+            return None
+        c = self._cell
+        return (math.floor(bbox[0] / c), math.floor(bbox[1] / c), math.floor(bbox[2] / c), math.floor(bbox[3] / c))
+
+    def overlaps_any(
+        self, box: tuple[float, float, float, float], exclude: tuple[float, float, float, float]
+    ) -> bool:
+        """box と重なる bbox(exclude と等しいものは除く)が1つでもあるか。"""
+        if any(b != exclude and _bbox_overlaps(box, b) for b in self._always):
+            return True
+        r = self._cell_range(box)
+        if r is None or (r[2] - r[0] + 1) * (r[3] - r[1] + 1) > _MAX_QUERY_CELLS:
+            return any(b != exclude and _bbox_overlaps(box, b) for b in self._bboxes)
+        for cx in range(r[0], r[2] + 1):
+            for cy in range(r[1], r[3] + 1):
+                for b in self._cells.get((cx, cy), ()):
+                    if b != exclude and _bbox_overlaps(box, b):
+                        return True
+        return False
+
+
 def _record_to_segments(record: VectorRecord) -> list[_Segment]:
     linewidth = record.get("linewidth")
     if linewidth is None or linewidth <= 0:
@@ -130,6 +186,7 @@ def _select_isolated_straight_samples(
     min_length = _min_segment_length(page_width, page_height)
 
     all_bboxes = [b for r in records if (b := _record_bbox(r)) is not None]
+    index = _BBoxGrid(all_bboxes, max(page_width, page_height, 1.0) / _GRID_DIVISIONS)
 
     candidates: list[_Segment] = []
     for record in records:
@@ -141,14 +198,8 @@ def _select_isolated_straight_samples(
             if segment.length() < min_length:
                 continue
             margin = max(segment.linewidth, 1.0)
-            neighborhood = segment.bbox(margin)
-            self_bbox = segment.bbox(0.0)
-            conflicts = sum(
-                1
-                for other_bbox in all_bboxes
-                if other_bbox != self_bbox and _bbox_overlaps(neighborhood, other_bbox)
-            )
-            if conflicts == 0:
+            # 近くに(自分と同じbboxのもの以外の)図形が1つも無い線分だけを孤立した線分とみなす
+            if not index.overlaps_any(segment.bbox(margin), exclude=segment.bbox(0.0)):
                 candidates.append(segment)
 
     grouped: dict[float, list[_Segment]] = defaultdict(list)
@@ -267,9 +318,12 @@ def calibrate_linewidth(
     }
     min_required = _min_required_samples(len(distinct_linewidths))
 
-    candidates = _select_isolated_straight_samples(
-        records, page.width, page.height, max_samples
-    )
+    metric("calib_records", len(records))
+    with stage("calib.select"):
+        candidates = _select_isolated_straight_samples(
+            records, page.width, page.height, max_samples
+        )
+    metric("calib_candidates", len(candidates))
     if len(candidates) < min_required:
         return CalibrationResult(
             scale=1.0,
@@ -278,20 +332,23 @@ def calibrate_linewidth(
             method="fallback_no_samples",
         )
 
-    raster = page.to_image(resolution=resolution).original.convert("L")
+    with stage("calib.render"):
+        raster = page.to_image(resolution=resolution).original.convert("L")
+    metric("calib_render_px", raster.width * raster.height)
     px_per_pt = resolution / 72.0
 
     ratios: list[float] = []
     used_linewidths: set[float] = set()
-    for segment in candidates:
-        measured_px = _measure_stroke_width_px(raster, segment, px_per_pt)
-        if measured_px is None:
-            continue
-        measured_pt = measured_px / px_per_pt
-        ratio = measured_pt / segment.linewidth
-        if _RATIO_MIN <= ratio <= _RATIO_MAX:
-            ratios.append(ratio)
-            used_linewidths.add(round(segment.linewidth, 3))
+    with stage("calib.measure"):
+        for segment in candidates:
+            measured_px = _measure_stroke_width_px(raster, segment, px_per_pt)
+            if measured_px is None:
+                continue
+            measured_pt = measured_px / px_per_pt
+            ratio = measured_pt / segment.linewidth
+            if _RATIO_MIN <= ratio <= _RATIO_MAX:
+                ratios.append(ratio)
+                used_linewidths.add(round(segment.linewidth, 3))
 
     if len(ratios) < min_required:
         return CalibrationResult(

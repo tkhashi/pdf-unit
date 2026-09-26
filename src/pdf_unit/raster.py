@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import ctypes
 import io
+from collections.abc import Container
 from dataclasses import dataclass
 from typing import TypedDict
 
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 from PIL import Image
+
+from .timing import add_metric, stage
 
 
 class ImageRecord(TypedDict):
@@ -31,7 +34,7 @@ class ImageRecord(TypedDict):
 @dataclass(frozen=True)
 class PageImages:
     records: list[ImageRecord]
-    pngs: list[bytes]
+    pngs: dict[int, bytes]  # 画像番号(ImageRecord.index) -> PNG。png_indices で指定した画像だけ
 
 
 def _to_page(point: tuple[float, float], forms: list[pdfium.PdfMatrix]) -> tuple[float, float]:
@@ -77,9 +80,14 @@ def _iter_images(page: pdfium.PdfPage, form=None, forms: list[pdfium.PdfMatrix] 
             yield from _iter_images(page, obj, [*forms, obj.get_matrix()], level + 1)
 
 
-def extract_page_images(pdf_data: bytes, page_no: int) -> PageImages:
+def extract_page_images(pdf_data: bytes, page_no: int, png_indices: Container[int] | None = None) -> PageImages:
+    """ページ内の埋め込み画像の配置情報と、png_indices で指定した画像番号の PNG を返す(None なら全画像)。
+
+    画像データの取り出し(get_bitmap)は、PNG が不要な画像でも行う。取り出せない画像は飛ばして番号を
+    詰めるため、取り出しを省くと画像番号が変わりうるから。PNG 化(時間の大半)だけを指定した画像に絞る(ADR 0026)。
+    """
     records: list[ImageRecord] = []
-    pngs: list[bytes] = []
+    pngs: dict[int, bytes] = {}
     pdf = pdfium.PdfDocument(pdf_data)
     try:
         page = pdf[page_no]
@@ -94,24 +102,31 @@ def extract_page_images(pdf_data: bytes, page_no: int) -> PageImages:
             xs = [x for x, _ in corners]
             ys = [y for _, y in corners]
             try:
-                # 回転なし: render=Trueでアルファマスク・反転を適用した見た目を外接矩形に描く。
-                # 回転あり: PDFiumのレンダリングは端が欠けるため、生の画素を返し
-                # UI側で四隅に合わせたアフィン変換で描く(アルファマスクは未適用)。
-                pil = obj.get_bitmap(render=axis_aligned).to_pil()
+                with stage("images.decode"):
+                    # 回転なし: render=Trueでアルファマスク・反転を適用した見た目を外接矩形に描く。
+                    # 回転あり: PDFiumのレンダリングは端が欠けるため、生の画素を返し
+                    # UI側で四隅に合わせたアフィン変換で描く(アルファマスクは未適用)。
+                    bitmap = obj.get_bitmap(render=axis_aligned)
             except pdfium.PdfiumError:
                 continue
-            if axis_aligned and rotation in _ROTATE_TRANSPOSE:
-                # render=Trueの結果はPDF座標での向きなので、表示時のページ回転に合わせる
-                pil = pil.transpose(_ROTATE_TRANSPOSE[rotation])
-            buf = io.BytesIO()
-            pil.save(buf, format="PNG")
+            index = len(records)
+            if png_indices is None or index in png_indices:
+                with stage("images.png"):
+                    pil = bitmap.to_pil()
+                    if axis_aligned and rotation in _ROTATE_TRANSPOSE:
+                        # render=Trueの結果はPDF座標での向きなので、表示時のページ回転に合わせる
+                        pil = pil.transpose(_ROTATE_TRANSPOSE[rotation])
+                    buf = io.BytesIO()
+                    pil.save(buf, format="PNG")
+                pngs[index] = buf.getvalue()
+                add_metric("images_png_px", pil.width * pil.height)
             px_w, px_h = obj.get_px_size()
             # 画像の横辺(左下→右下)の長さ。回転していても実寸になる
             width_pt = ((xs[1] - xs[0]) ** 2 + (ys[1] - ys[0]) ** 2) ** 0.5
             records.append(
                 {
                     "type": "image",
-                    "index": len(records),
+                    "index": index,
                     "bbox": (min(xs), min(ys), max(xs), max(ys)),
                     "quad": [round(v, 2) for x, y in zip(xs, ys) for v in (x, y)],
                     "placement": "bbox" if axis_aligned else "affine",
@@ -121,7 +136,6 @@ def extract_page_images(pdf_data: bytes, page_no: int) -> PageImages:
                     "filters": list(obj.get_filters()),
                 }
             )
-            pngs.append(buf.getvalue())
     finally:
         pdf.close()
     return PageImages(records, pngs)

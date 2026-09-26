@@ -1,0 +1,55 @@
+@import "tailwindcss";
+/* 使う部品だけを取り込む(ボタン・ボタン群・チェックボックス・スライダー) */
+@plugin "daisyui" {
+  themes: pdfunit --default;
+  include:
+    button, join, checkbox, range, rootcolor, rootscrollgutter, properties;
+}
+
+/* 画面全体の配色。ヘッダーは暗色、図面の周囲は明るい灰色 */
+@plugin "daisyui/theme" {
+  name: "pdfunit";
+  default: true;
+  color-scheme: light;
+  --color-base-100: #ffffff;
+  --color-base-200: #e5e7eb;
+  --color-base-300: #d1d5db;
+  --color-base-content: #1f2937;
+  --color-primary: #2563eb;
+  --color-primary-content: #ffffff;
+  --color-neutral: #1f2328;
+  --color-neutral-content: #f3f4f6;
+  --color-warning: #facc15;
+  --color-warning-content: #111827;
+  --radius-field: 0.3rem;
+  --radius-box: 0.5rem;
+  --radius-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --size-selector: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+/* ヘッダーの高さが項目数で変わっても表示領域が追従し、スクロールバーが出ないよう縦flexにする */
+body {
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+  background: var(--color-base-200);
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 表示できないサムネイル(斜線) */
+.thumb-unavailable {
+  background: repeating-linear-gradient(45deg, #f3f4f6 0 6px, #e5e7eb 6px 12px);
+}
