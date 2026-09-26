@@ -229,7 +229,7 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 ### pdfplumber → pypdfium2 移行の効果測定 PoC
 
 `pdfplumber` を使っている線・文字の抽出、ページ画像化を `pypdfium2` 単体で代替できるか、
-効果測定 PoC を行っています([ADR 0032](docs/adr/0032-pdfium-migration-poc.md))。本体の
+効果測定 PoC を行っています([ADR 0035](docs/adr/0035-pdfium-migration-poc.md))。本体の
 `src/pdf_unit/` は変更していません。試作の代替実装は `scripts/poc_pypdfium2/` に置き、
 `scripts/poc_bench.py` で既存実装と比較計測します。
 
