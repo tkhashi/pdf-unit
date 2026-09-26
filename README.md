@@ -226,6 +226,26 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 - 計測する API は `--endpoints`(既定 `lines,image,images,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)、1ページで計測する埋め込み画像の数は `--max-images`(既定3、0で全件)で指定します
 - 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
+### pdfplumber → pypdfium2 移行の効果測定 PoC
+
+`pdfplumber` を使っている線・文字の抽出、ページ画像化を `pypdfium2` 単体で代替できるか、
+効果測定 PoC を行っています([ADR 0032](docs/adr/0032-pdfium-migration-poc.md))。本体の
+`src/pdf_unit/` は変更していません。試作の代替実装は `scripts/poc_pypdfium2/` に置き、
+`scripts/poc_bench.py` で既存実装と比較計測します。
+
+```sh
+uv run python scripts/poc_bench.py 図面.pdf --pages 1-3 --out out/poc   # 応答・PNGを保存
+uv run python scripts/poc_bench.py 図面.pdf --kinds image --resolutions 100,200,400
+```
+
+- 出力は `--out` で指定したディレクトリに保存されます(線・文字は JSON、画像化は PNG)。線・文字は
+  PoC 実装が本番と同じ出力形式を目指していないため自動比較はせず、件数と目視で確認します。画像化は
+  画素差分(既存 vs PoC)を要約に出します
+- PoC 実装は次の点を簡略化しています。線抽出は矩形・直線・曲線の分類のみで、pdfplumber の
+  `polylines`(ヒット判定用の折れ線群)は持ちません。文字抽出は `FPDFText_CountRects` による
+  連続領域(行単位に近い)を単位とし、pdfplumber の単語単位のグルーピングや cid 文字補完・
+  フォント名デコードは行いません
+
 ## ファイル構成
 
 ```
@@ -249,6 +269,8 @@ scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
   profile_pages.py ページごとの API の性能計測
+  poc_bench.py     pdfplumber → pypdfium2 移行の効果測定 PoC(既存実装との比較計測)
+  poc_pypdfium2/   PoC 用の pypdfium2 直接実装(試作。本番コードからは参照しない)
   next_version.sh  デプロイする版の決定(タグとリリース PR のラベルから)
 .github/workflows/deploy.yml  main へのマージで AWS へ反映し、版のタグとリリースを作る
 .github/release.yml  自動生成のリリースノートの分類
