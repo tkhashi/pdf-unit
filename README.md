@@ -226,25 +226,31 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 - 計測する API は `--endpoints`(既定 `lines,image,images,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)、1ページで計測する埋め込み画像の数は `--max-images`(既定3、0で全件)で指定します
 - 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
-### pdfplumber → pypdfium2 移行の効果測定 PoC
+### pdfplumber → pypdfium2 移行の調査
 
-`pdfplumber` を使っている線・文字の抽出、ページ画像化を `pypdfium2` 単体で代替できるか、
-効果測定 PoC を行っています([ADR 0035](docs/adr/0035-pdfium-migration-poc.md))。本体の
-`src/pdf_unit/` は変更していません。試作の代替実装は `scripts/poc_pypdfium2/` に置き、
-`scripts/poc_bench.py` で既存実装と比較計測します。
+`pdfplumber` を使っている線・文字の抽出、ページ画像化を `pypdfium2` に置き換えられるかを調べています
+([ADR 0035](docs/adr/0035-pdfium-migration-poc.md)・[0036](docs/adr/0036-pdfium-migration-poc-result.md)・[0037](docs/adr/0037-pdfium-migration-research.md))。
+本体の `src/pdf_unit/` は変更していません。移行するかどうかは未決定です(ADR 0037 は提案)。
+
+- **`scripts/poc_pypdfium2/pdfium_page.py`**: pdfplumber の Page と同じ形(`width`・`height`・`rects`・`curves`・
+  `lines`・`chars`・`to_image()`)のデータを PDFium から作る互換クラス。既存の `extract_page_lines`・
+  `calibrate_linewidth`・`extract_page_texts` にそのまま渡せます
+- **`scripts/poc_compare.py`**: `/api/page/lines` の応答を本番と互換クラスで作って突き合わせ、処理時間を本番と同じ区間名で比べます。
+  線は要素ごと、テキストは文字の原点と単語の文字列で対応づけて比べます
+- **`scripts/poc_pypdfium2/fixtures.py`**: 差が出うる条件(ページ回転・MediaBox の原点・CropBox・複数サブパス・`v`/`y` 演算子・
+  色空間・Form XObject など)の合成PDFを書き出します
+- **`scripts/poc_pypdfium2/concurrency.py`**: ページ切替時の同時リクエスト(線データ+原本画像2解像度)を1プロセスで計ります
 
 ```sh
-uv run python scripts/poc_bench.py 図面.pdf --pages 1-3 --out out/poc   # 応答・PNGを保存
-uv run python scripts/poc_bench.py 図面.pdf --kinds image --resolutions 100,200,400
+uv run python scripts/poc_compare.py 図面.pdf --pages 1-3 --label 図面A   # --label で表示名を変える(ファイル名を出さない)
+uv run python scripts/poc_pypdfium2/fixtures.py out/fixtures && uv run python scripts/poc_compare.py out/fixtures/vy.pdf
+uv run python scripts/poc_pypdfium2/concurrency.py 1ページのPDF.pdf
 ```
 
-- 出力は `--out` で指定したディレクトリに保存されます(線・文字は JSON、画像化は PNG)。線・文字は
-  PoC 実装が本番と同じ出力形式を目指していないため自動比較はせず、件数と目視で確認します。画像化は
-  画素差分(既存 vs PoC)を要約に出します
-- PoC 実装は次の点を簡略化しています。線抽出は矩形・直線・曲線の分類のみで、pdfplumber の
-  `polylines`(ヒット判定用の折れ線群)は持ちません。文字抽出は `FPDFText_CountRects` による
-  連続領域(行単位に近い)を単位とし、pdfplumber の単語単位のグルーピングや cid 文字補完・
-  フォント名デコードは行いません
+- 時間は子プロセスで `--repeat` 回(既定3)計り、最小値を採ります。`--f32` で float32 の値をそのまま使います
+  (既定は「float32 として同じ値になる最短の10進数」に戻します)
+- 最初の PoC の `scripts/poc_bench.py` と `scripts/poc_pypdfium2/poc_lines.py`・`poc_texts.py`・`poc_render.py` は記録として
+  残していますが、pdfplumber 側だけ import の時間が計測に入るなどの問題があるため、計測には `poc_compare.py` を使ってください(ADR 0037)
 
 ## ファイル構成
 
@@ -269,8 +275,9 @@ scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
   profile_pages.py ページごとの API の性能計測
-  poc_bench.py     pdfplumber → pypdfium2 移行の効果測定 PoC(既存実装との比較計測)
-  poc_pypdfium2/   PoC 用の pypdfium2 直接実装(試作。本番コードからは参照しない)
+  poc_compare.py   pdfplumber → pypdfium2 移行の調査: /api/page/lines の応答と処理時間を本番と比較
+  poc_bench.py     最初の効果測定 PoC(記録として残す。計測には poc_compare.py を使う)
+  poc_pypdfium2/   移行調査の試作(互換クラス pdfium_page.py・合成PDF fixtures.py・同時リクエスト concurrency.py。本番コードからは参照しない)
   next_version.sh  デプロイする版の決定(タグとリリース PR のラベルから)
 .github/workflows/deploy.yml  main へのマージで AWS へ反映し、版のタグとリリースを作る
 .github/release.yml  自動生成のリリースノートの分類
