@@ -716,11 +716,23 @@ class ApiError extends Error {
 
 const mb = (n) => (n / 1024 / 1024).toFixed(1);
 
+// ---- 計測(ADR 0023) ----
+// API呼び出しの所要時間・サイズ・サーバー側の内訳(Server-Timing)と、ページ切替からの経過時間を
+// console.debug に出す(ブラウザの既定では表示されない Verbose レベル)。画面の表示・動作には影響させない
+let pagePerf = null;  // { page, t0 }
+function perfStart(page) { pagePerf = { page, t0: performance.now() }; }
+function perfMark(page, label, extra = "") {
+  if (!pagePerf || pagePerf.page !== page) return;
+  console.debug(`[perf] p${page + 1} ${label} +${Math.round(performance.now() - pagePerf.t0)}ms`, extra);
+}
+const kb = (n) => (n == null ? "?" : Math.round(n / 1024));
+
 async function apiPost(path, body) {
   if (body.bytes.length > MAX_SEND_BYTES) {
     // 送っても 413 になるので送信しない
     throw new ApiError(413, `このページはデータが大きく(${mb(body.bytes.length)}MB、上限${mb(MAX_SEND_BYTES)}MB)処理できません`);
   }
+  const t0 = performance.now();
   const res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/pdf", "x-amz-content-sha256": body.sha256 },
@@ -731,7 +743,11 @@ async function apiPost(path, body) {
     try { detail = (await res.json()).detail ?? detail; } catch {}
     throw new ApiError(res.status, detail);
   }
-  return res.json();
+  const data = await res.json();
+  console.debug(`[perf] ${path} ${Math.round(performance.now() - t0)}ms ` +
+    `送信${kb(body.bytes.length)}KB 受信${kb(res.headers.get("content-length"))}KB`,
+    res.headers.get("server-timing") ?? "", res.headers.get("x-perf-metrics") ?? "");
+  return data;
 }
 
 async function sha256Hex(bytes) {
@@ -742,10 +758,14 @@ async function sha256Hex(bytes) {
 // 指定ページだけを含むPDFを作る。そのページが参照するフォント・画像と、親から引き継ぐ属性(Resources・
 // MediaBox・CropBox・Rotate)だけが入る
 async function extractPages(target, indices) {
+  const t0 = performance.now();
   const out = await PDFLib.PDFDocument.create();
   for (const page of await out.copyPages(target.pdf, indices)) out.addPage(page);
   const bytes = await out.save({ useObjectStreams: false });
-  return { bytes, sha256: await sha256Hex(bytes) };
+  const sha256 = await sha256Hex(bytes);
+  console.debug(`[perf] 切り出し p${indices[0] + 1}${indices.length > 1 ? `-${indices.at(-1) + 1}` : ""} ` +
+    `${Math.round(performance.now() - t0)}ms ${kb(bytes.length)}KB`);
+  return { bytes, sha256 };
 }
 
 // 1ページ分の切り出しは直近 PAGE_PDF_CACHE 件を使い回す(同時の要求でも1回だけ作るよう Promise を持つ)
@@ -909,6 +929,7 @@ function setThumbsVisible(visible) {
 let pageRequest = 0;  // ページ連続切替時に、古いページの応答で上書きしないための通し番号
 async function showPage(n) {
   const request = ++pageRequest;
+  perfStart(n);
   currentPage = n;
   $("pageInfo").textContent = `${n + 1} / ${doc.pages.length} ページ`;
   const { width, height } = doc.pages[n];
@@ -936,6 +957,7 @@ async function showPage(n) {
     if (request === pageRequest) { mainLoading = false; pumpThumbs(); }
   }
   if (request !== pageRequest) return;
+  perfMark(n, "線データ受信");
   // 座標系の基準はサーバー(pdfplumber)の寸法。pdf-libで求めた寸法と食い違えば合わせる
   const size = doc.pages[n];
   if (Math.abs(size.width - data.page.width) > 0.01 || Math.abs(size.height - data.page.height) > 0.01) {
@@ -945,10 +967,12 @@ async function showPage(n) {
     fit();
   }
   prepare(data);
+  perfMark(n, "描画準備完了", `${items.length}要素`);
   const counts = items.reduce((acc, it) => (acc[it.type] = (acc[it.type] || 0) + 1, acc), {});
   renderLegend(counts);
   showCalibration(data.calibration, lwScale);
   requestRender();
+  requestAnimationFrame(() => perfMark(n, "初回描画完了"));  // requestRender の描画と同じフレームの後に呼ばれる
 }
 
 // 線幅補正の係数を表示する。算出できなかった場合(補正なし)は「-」とし、詳細はマウスオーバーで補足する
@@ -1045,6 +1069,7 @@ function updateImage() {
       if (doc !== target || currentPage !== page || r.resolution <= imageRes) return;
       imageRes = r.resolution;
       img.src = pngDataUrl(r.png_base64);
+      img.decode().then(() => perfMark(page, `原本画像表示 ${r.resolution}dpi`), () => {});
     })
     .catch(() => { if (doc === target && currentPage === page && currentRes === res) currentRes = 0; });
 }

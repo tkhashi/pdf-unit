@@ -20,6 +20,7 @@ import pypdfium2.raw as pdfium_c
 from pdfplumber.utils import extract_words
 
 from .raster import PageToDisplay
+from .timing import metric, stage
 
 
 class LineRecord(TypedDict):
@@ -298,6 +299,7 @@ def _restore_cid_chars(
     3. それ以外は復元できない文字として「□」にし、unreadable フラグを付ける
     """
     cids = [(i, int(m.group(1))) for i, c in enumerate(chars) if (m := _CID_RE.fullmatch(c["text"]))]
+    metric("cid_chars", len(cids))
     if not cids:
         return chars
     table = _pdfium_chars_by_origin(pdf_data, page_no)
@@ -422,26 +424,31 @@ def decode_font_names(names: list[Any]) -> dict[Any, str]:
 
 def extract_page_texts(page: pdfplumber.page.Page, pdf_data: bytes, page_no: int) -> list[TextRecord]:
     """文字を単語単位にまとめる。フォント・サイズ・色が変わる箇所では別単語に分ける。"""
-    chars = _restore_cid_chars(page.chars, pdf_data, page_no, page.height)
-    words = extract_words(
-        chars, extra_attrs=["fontname", "size", "non_stroking_color"], return_chars=True
-    )
-    font_names = decode_font_names([w.get("fontname") for w in words])
-    records: list[TextRecord] = []
-    for w in words:
-        if not w["text"].strip():
-            continue
-        glyphs = [g for c in w["chars"] if (g := _glyph(c, page.height)) is not None]
-        records.append(
-            {
-                "type": "text",
-                "text": w["text"],
-                "bbox": (w["x0"], w["top"], w["x1"], w["bottom"]),
-                "fontname": font_names.get(w.get("fontname")),
-                "size": round(w["size"], 2) if w.get("size") else None,
-                "color": _color_to_css(w.get("non_stroking_color")),
-                "chars": glyphs,
-                "unreadable": sum(1 for c in w["chars"] if c.get("unreadable")),
-            }
+    metric("chars", len(page.chars))
+    with stage("texts.cid"):
+        chars = _restore_cid_chars(page.chars, pdf_data, page_no, page.height)
+    with stage("texts.words"):
+        words = extract_words(
+            chars, extra_attrs=["fontname", "size", "non_stroking_color"], return_chars=True
         )
+    with stage("texts.fonts"):
+        font_names = decode_font_names([w.get("fontname") for w in words])
+    records: list[TextRecord] = []
+    with stage("texts.records"):
+        for w in words:
+            if not w["text"].strip():
+                continue
+            glyphs = [g for c in w["chars"] if (g := _glyph(c, page.height)) is not None]
+            records.append(
+                {
+                    "type": "text",
+                    "text": w["text"],
+                    "bbox": (w["x0"], w["top"], w["x1"], w["bottom"]),
+                    "fontname": font_names.get(w.get("fontname")),
+                    "size": round(w["size"], 2) if w.get("size") else None,
+                    "color": _color_to_css(w.get("non_stroking_color")),
+                    "chars": glyphs,
+                    "unreadable": sum(1 for c in w["chars"] if c.get("unreadable")),
+                }
+            )
     return records

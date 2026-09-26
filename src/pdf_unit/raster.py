@@ -15,6 +15,8 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 from PIL import Image
 
+from .timing import add_metric, stage
+
 
 class ImageRecord(TypedDict):
     type: str  # "image"
@@ -94,17 +96,20 @@ def extract_page_images(pdf_data: bytes, page_no: int) -> PageImages:
             xs = [x for x, _ in corners]
             ys = [y for _, y in corners]
             try:
-                # 回転なし: render=Trueでアルファマスク・反転を適用した見た目を外接矩形に描く。
-                # 回転あり: PDFiumのレンダリングは端が欠けるため、生の画素を返し
-                # UI側で四隅に合わせたアフィン変換で描く(アルファマスクは未適用)。
-                pil = obj.get_bitmap(render=axis_aligned).to_pil()
+                with stage("images.decode"):
+                    # 回転なし: render=Trueでアルファマスク・反転を適用した見た目を外接矩形に描く。
+                    # 回転あり: PDFiumのレンダリングは端が欠けるため、生の画素を返し
+                    # UI側で四隅に合わせたアフィン変換で描く(アルファマスクは未適用)。
+                    pil = obj.get_bitmap(render=axis_aligned).to_pil()
             except pdfium.PdfiumError:
                 continue
-            if axis_aligned and rotation in _ROTATE_TRANSPOSE:
-                # render=Trueの結果はPDF座標での向きなので、表示時のページ回転に合わせる
-                pil = pil.transpose(_ROTATE_TRANSPOSE[rotation])
-            buf = io.BytesIO()
-            pil.save(buf, format="PNG")
+            with stage("images.png"):
+                if axis_aligned and rotation in _ROTATE_TRANSPOSE:
+                    # render=Trueの結果はPDF座標での向きなので、表示時のページ回転に合わせる
+                    pil = pil.transpose(_ROTATE_TRANSPOSE[rotation])
+                buf = io.BytesIO()
+                pil.save(buf, format="PNG")
+            add_metric("images_px", pil.width * pil.height)
             px_w, px_h = obj.get_px_size()
             # 画像の横辺(左下→右下)の長さ。回転していても実寸になる
             width_pt = ((xs[1] - xs[0]) ** 2 + (ys[1] - ys[0]) ** 2) ** 0.5
