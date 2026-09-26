@@ -222,9 +222,10 @@ def _render_thumbnails(data: bytes, width: int) -> list[dict]:
     return thumbs
 
 
-def _images(data: bytes, page_no: int) -> PageImages:
+def _images(data: bytes, page_no: int, png_indices: tuple[int, ...] = ()) -> PageImages:
+    """埋め込み画像の配置情報と、png_indices で指定した画像の PNG(既定は PNG 化しない)。"""
     with _pdfium_locked(), stage("images"):
-        return extract_page_images(data, page_no)
+        return extract_page_images(data, page_no, png_indices)
 
 
 def _downscale_png(png: bytes) -> str:
@@ -309,8 +310,8 @@ def embedded_image(response: Response, index: int, data: bytes = Depends(pdf_bod
     with collect() as timings:
         with _open_page(data, _PAGE):
             pass
-        pngs = _images(data, _PAGE).pngs
-        if not 0 <= index < len(pngs):
+        pngs = _images(data, _PAGE, png_indices=(index,)).pngs
+        if index not in pngs:
             raise HTTPException(status_code=404, detail="image not found")
         encoded = _downscale_png(pngs[index])
     _set_timing_headers(response, timings)
