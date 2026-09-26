@@ -3,6 +3,7 @@
 - ステータス: 採用
 - 日付: 2026-09-26
 - 追記(2026-09-26): [0039](0039-embedded-images-as-outlines.md) で、UI はこの API(`/api/page/images/{k}`)を使わなくなりました。API は残しています。
+- 追記(2026-09-26): [0040](0040-remove-embedded-image-data-api.md) で `/api/page/images/{k}` を削除しました。
 
 ## コンテキスト
 

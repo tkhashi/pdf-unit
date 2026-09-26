@@ -126,7 +126,7 @@ test("文書を開いた直後の表示・通信・計測ログが一致する",
     p,
     async (ui) =>
       ui.apiCalls
-        // 新UIは埋め込み画像の画像データを要求しない(ADR 0039)
+        // 新UIは埋め込み画像の画像データを要求しない(ADR 0039)。旧UIの要求はサーバーが 404 を返す(ADR 0040)
         .filter((c) => !c.path.startsWith("/api/page/images"))
         .map((c) => `${c.path} ${c.sha256}`)
         .sort(),

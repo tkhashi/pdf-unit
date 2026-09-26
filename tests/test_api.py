@@ -146,17 +146,21 @@ def test_font_name_encodings(fontname):
 # ---- 埋め込み画像 ----
 
 def test_embedded_images():
-    pdf = fixture("image")
-    assert [im["bbox"] for im in post("/api/page/lines", pdf)["images"]] == [[20, 130, 70, 180]]
-    single = post("/api/page/images/0", pdf)["png_base64"]
-    batch = post("/api/page/images", pdf)
-    assert batch["total"] == 1 and batch["next"] is None
-    assert batch["images"] == [{"index": 0, "png_base64": single}]
+    images = post("/api/page/lines", fixture("image"))["images"]
+    assert [(im["bbox"], im["quad"], im["px_width"], im["px_height"]) for im in images] == [
+        ([20, 130, 70, 180], [20, 180, 70, 180, 70, 130, 20, 130], 2, 2)
+    ]
+
+
+@pytest.mark.parametrize("path", ["/api/page/images/0", "/api/page/images"])
+def test_embedded_image_data_api_is_removed(path):
+    """UI は画像データを使わない(ADR 0039)ため、画像データの API は削除した(ADR 0040)。"""
+    assert client.post(path, content=fixture("image")).status_code == 404
 
 
 # ---- エラー応答 ----
 
-@pytest.mark.parametrize("path", ["/api/page/lines", "/api/page/image", "/api/page/images/0", "/api/page/images"])
+@pytest.mark.parametrize("path", ["/api/page/lines", "/api/page/image"])
 @pytest.mark.parametrize("pdf", [
     BASIC,  # PDF ではない
     fixture("basic")[:300],  # 途中で切れている
@@ -165,12 +169,6 @@ def test_embedded_images():
 def test_invalid_pdf_is_400(path, pdf):
     r = client.post(path, content=pdf, headers={"content-type": "application/pdf"})
     assert r.status_code == 400
-
-
-def test_missing_image_is_404():
-    pdf = fixture("basic")
-    assert client.post("/api/page/images/0", content=pdf).status_code == 404
-    assert client.post("/api/page/images", content=fixture("image"), params={"start": 5}).status_code == 404
 
 
 def test_page_image():

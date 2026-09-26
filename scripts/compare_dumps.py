@@ -2,7 +2,7 @@
 
     uv run python scripts/compare_dumps.py <変更前のDIR> <変更後のDIR> [--jsonl 変更前.jsonl 変更後.jsonl]
 
-- 原本画像(`*_image_*.json`)・埋め込み画像(`*_images_*.json`)はバイト単位で比べる
+- 原本画像(`*_image_*.json`)などの線データ以外はバイト単位で比べる
 - 線データ(`*_lines.json`)は、`page`・`linewidth_scale`・`calibration` と、`lines`/`images` の要素ごとの
   キー単位の不一致件数・数値の最大差を出す。`texts` は並び順や単語の分割の違いに影響されないよう、
   文字は原点の位置、単語は「文字列+先頭の文字の原点」で対応づけて比べる
