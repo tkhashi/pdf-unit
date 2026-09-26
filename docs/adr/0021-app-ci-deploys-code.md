@@ -51,3 +51,9 @@ GitHub Actions で自動デプロイしたいという要件があった。条�
 - 反映は Lambda → 静的ファイルの順なので、数十秒は新旧が混在する
 - Lambda の実行環境(Python の版・アーキテクチャ・起動方法)を変えるときは、アプリと infra の両方を変更する必要がある
 - 検証: zip は 24MB(展開後 66MB)で、同梱のネイティブライブラリはすべて aarch64。Lambda の公式ベースイメージ(`public.ecr.aws/lambda/python:3.13`、arm64)の中で `run.sh` を起動し、`GET /` と `POST /api/page/lines` が手元と同じ結果になることを確認した
+
+## 追記(2026-09-26): OIDC の `sub` の形式
+
+初回の Deploy は、ロールを引き受ける段階で `Not authorized to perform sts:AssumeRoleWithWebIdentity` になった。このリポジトリは GitHub の OIDC で不変の識別子(`use_immutable_subject`)を使う設定のため、トークンの `sub` は `repo:tkhashi/pdf-unit:ref:refs/heads/main` ではなく、オーナーとリポジトリの数値IDを含む `repo:tkhashi@66816003/pdf-unit@1386009673:ref:refs/heads/main` だった。
+
+「このリポジトリの main からだけ引き受けられる」という決定は変えず、infra のロールの信頼条件をIDを含む形式に合わせた(pdf-unit.infra の `githubRepoOwnerId`・`githubRepoId`)。IDで照合するので、リポジトリ名を変えたり同名のリポジトリを作り直したりしても、なりすましは起きない。GitHub 側のこの設定は変更しないこと(変えると信頼条件と一致しなくなる)。

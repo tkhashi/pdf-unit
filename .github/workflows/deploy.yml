@@ -23,7 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # environment: は指定しない。指定すると OIDC トークンの sub が repo:<repo>:environment:<name> になり、
-    # infra のロールの信頼条件(repo:tkhashi/pdf-unit:ref:refs/heads/main)と一致しなくなる
+    # infra のロールの信頼条件(repo:tkhashi@66816003/pdf-unit@1386009673:ref:refs/heads/main)と一致しなくなる。
+    # このリポジトリは OIDC で不変の識別子(use_immutable_subject)を使うため、sub はオーナーとリポジトリのIDを含む
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
