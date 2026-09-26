@@ -14,6 +14,9 @@ LOCAL=0
 if [[ "${1:-}" == "--local" ]]; then LOCAL=1; shift; fi
 BASE="${1:?usage: smoke_test.sh [--local] <SITE_URL>}"
 BASE="${BASE%/}"
+# SITE_URL をスキーム無し(xxxx.cloudfront.net)で登録しても動くよう https を補う
+# (http だと CloudFront が https への 301 を返して判定に失敗する)
+[[ "$BASE" == http://* || "$BASE" == https://* ]] || BASE="https://$BASE"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
