@@ -23,6 +23,7 @@ import pdfplumber
 import pypdfium2 as pdfium
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -45,6 +46,11 @@ _MAX_RESOLUTION = 600
 _MAX_THUMBS_PER_REQUEST = 10
 
 app = FastAPI(title="PDF Unit")
+# 応答を gzip で圧縮する(ADR 0024)。線数の多いページの抽出結果は JSON で6MB(Lambda の応答上限)を超えるが、
+# 圧縮すれば1/6〜1/9になる。ブラウザが展開するので受け取る内容は変わらない。圧縮レベルは既定の9だと時間が
+# かかる割に縮まないため4にする(実測: 12.8MBの応答が level 4 で 2.14MB・87ms、level 9 で 1.95MB・760ms)。
+# 後で登録する計測ログのミドルウェアより内側になるので、ログの resp_bytes は圧縮後の大きさになる
+app.add_middleware(GZipMiddleware, compresslevel=4)
 # UIが使う同梱ライブラリ(static/vendor/pdf-lib.min.js 等)。index.html は相対パス vendor/ で参照するので、
 # 静的ファイルとして index.html と vendor/ を並べて配置すればそのまま動く
 app.mount("/vendor", StaticFiles(directory=_STATIC_DIR / "vendor"), name="vendor")

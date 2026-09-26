@@ -7,6 +7,9 @@
   Node.js が無い場合は pypdfium2 で切り出す(バイト列が UI と異なるため、計測値の比較には注意)。
 - 1回のAPI呼び出しごとに子プロセスを起動し、ASGI アプリを直接呼ぶ(Depends・JSON 直列化・ミドルウェアを含む
   実際の処理経路)。子プロセスの ru_maxrss を、その呼び出しのピークメモリとみなす。
+- ブラウザと同じく Accept-Encoding: gzip を付けて送る。resp_bytes は展開後、wire_bytes は転送される大きさ、
+  lambda_bytes は Lambda の応答上限(6MB)と比べる大きさの推定(圧縮した応答は Lambda Web Adapter が base64 化
+  するので4/3倍)。--dump には展開後のボディを保存する。
 - 所要時間の内訳はサーバーが返す Server-Timing / X-Perf-Metrics ヘッダーから取る。
   other_ms = 全体 - 内訳の上位区間の合計(リクエストの受信・検証、JSON 直列化など)。
 - --dump DIR: 各応答のボディを保存する(変更前後で出力が同一かを cmp で確かめる用)。
@@ -19,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -67,7 +71,11 @@ async def _asgi_post(app, path: str, query: str, body: bytes) -> tuple[int, dict
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
         "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": query.encode(),
         "root_path": "", "server": ("127.0.0.1", 8000), "client": ("127.0.0.1", 50000),
-        "headers": [(b"content-type", b"application/pdf"), (b"content-length", str(len(body)).encode())],
+        "headers": [
+            (b"content-type", b"application/pdf"),
+            (b"content-length", str(len(body)).encode()),
+            (b"accept-encoding", b"gzip"),  # ブラウザと同じ
+        ],
     }
     sent = False
 
@@ -139,6 +147,10 @@ def _run_child(job: dict) -> dict:
     with contextlib.redirect_stdout(log):
         status, headers, body = asyncio.run(_asgi_post(server.app, path, query, data))
     total = (time.perf_counter() - start) * 1000
+    wire = len(body)
+    compressed = headers.get("content-encoding") == "gzip"
+    if compressed:
+        body = gzip.decompress(body)
     stages = _parse_server_timing(headers.get("server-timing", ""))
     top = sum(v for k, v in stages.items() if "." not in k and k != "lock_wait")
     result.update(
@@ -146,6 +158,8 @@ def _run_child(job: dict) -> dict:
         total_ms=round(total, 1),
         other_ms=round(total - top, 1),
         resp_bytes=len(body),
+        wire_bytes=wire,
+        lambda_bytes=wire * 4 // 3 if compressed else wire,
         stages_ms=stages,
         metrics=json.loads(headers.get("x-perf-metrics", "{}")),
         maxrss_mb=_maxrss_mb(),
@@ -215,11 +229,12 @@ def _summarize(results: list[dict]) -> None:
     failed = [r for r in results if "error" not in r and r.get("status") != 200]
     errors = [r for r in results if "error" in r]
     print("\n== 呼び出しごと(所要時間の大きい順、上位20件) ==")
-    print(f"{'page':>5} {'api':<14} {'total_ms':>9} {'other_ms':>9} {'req_KB':>8} {'resp_KB':>8} {'maxrss_MB':>9}  主な区間")
+    print(f"{'page':>5} {'api':<14} {'total_ms':>9} {'other_ms':>9} {'req_KB':>8} {'resp_KB':>8} {'wire_KB':>8} {'maxrss_MB':>9}  主な区間")
     for r in sorted(ok, key=lambda r: -r["total_ms"])[:20]:
         stages = sorted(((k, v) for k, v in r.get("stages_ms", {}).items()), key=lambda kv: -kv[1])[:4]
         print(f"{r['page'] + 1:>5} {_label(r):<14} {r['total_ms']:>9.1f} {r.get('other_ms', 0):>9.1f} "
-              f"{r['req_bytes'] / 1024:>8.0f} {r.get('resp_bytes', 0) / 1024:>8.0f} {r['maxrss_mb']:>9.1f}  "
+              f"{r['req_bytes'] / 1024:>8.0f} {r.get('resp_bytes', 0) / 1024:>8.0f} "
+              f"{r.get('wire_bytes', r.get('resp_bytes', 0)) / 1024:>8.0f} {r['maxrss_mb']:>9.1f}  "
               + ", ".join(f"{k}={v:.0f}" for k, v in stages))
 
     print("\n== API・区間ごとの合計と最大(ms) ==")
@@ -237,14 +252,21 @@ def _summarize(results: list[dict]) -> None:
 
     print("\n== 上限・メモリ ==")
     if ok:
-        big = max(ok, key=lambda r: r.get("resp_bytes", 0))
-        print(f"応答の最大: {big.get('resp_bytes', 0) / 1024 / 1024:.2f}MB (p{big['page'] + 1} {_label(big)}、Lambda の上限は6MB)")
+        size = lambda r: r.get("lambda_bytes", r.get("resp_bytes", 0))  # noqa: E731
+        big = max(ok, key=size)
+        print(f"応答の最大(Lambda での推定): {size(big) / 1024 / 1024:.2f}MB (p{big['page'] + 1} {_label(big)}、"
+              f"展開後 {big.get('resp_bytes', 0) / 1024 / 1024:.2f}MB、Lambda の上限は6MB)")
+        over = [f"p{r['page'] + 1} {_label(r)}" for r in ok if size(r) > 6 * 1024 * 1024]
+        if over:
+            print(f"Lambda の応答上限を超える呼び出し: {over}")
         peak = max(ok, key=lambda r: r["maxrss_mb"])
         print(f"ピークメモリの最大: {peak['maxrss_mb']:.0f}MB (p{peak['page'] + 1} {_label(peak)}、"
               f"起動直後 {peak['maxrss_base_mb']:.0f}MB、Lambda は2048MB)")
-    over = sorted({r["page"] + 1 for r in ok if r.get("over_limit")})
+    over = sorted({(r["page"] + 1, r["kind"] == "thumbs") for r in results if r.get("over_limit")})
     if over:
-        print(f"送信上限(4MB)を超えるページ(UI では処理できない): {over}")
+        # thumbs は10ページ単位のバッチ(UI は半分ずつに分けて送り直す)。それ以外は1ページ(UI では処理できない)
+        print("送信上限(4MB)を超える切り出し: "
+              + ", ".join(f"p{p}〜のサムネイル" if thumbs else f"p{p}" for p, thumbs in over))
     for r in failed:
         print(f"HTTP {r['status']}: p{r['page'] + 1} {_label(r)}(集計から除外)")
     for r in errors:
