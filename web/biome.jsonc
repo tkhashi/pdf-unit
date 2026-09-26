@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": [
+    "ultracite/biome/core",
+    "ultracite/biome/react",
+    "ultracite/biome/vitest"
+  ],
+  "linter": {
+    "rules": {
+      "a11y": {
+        "noLabelWithoutControl": {
+          "level": "error",
+          "options": { "inputComponents": ["TriStateCheckbox"] }
+        }
+      }
+    }
+  },
+  "files": {
+    "includes": [
+      "!playwright-report",
+      "!test-results",
+      "!dist-e2e",
+      "!e2e/.fixtures"
+    ]
+  },
+  "overrides": [
+    {
+      // E2E はブラウザの操作を順に待つのが本来の書き方で、新旧比較は PARITY=1 のときだけ動かす
+      "includes": ["e2e/**"],
+      "linter": {
+        "rules": {
+          "complexity": { "noExcessiveCognitiveComplexity": "off" },
+          "performance": { "noAwaitInLoops": "off" },
+          "suspicious": { "noSkippedTests": "off" }
+        }
+      }
+    }
+  ]
+}

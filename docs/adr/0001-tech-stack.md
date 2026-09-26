@@ -1,6 +1,6 @@
 # ADR 0001: FastAPI + 単一HTML、PDF読み取りは pdfplumber と PDFium を採用する
 
-- ステータス: 採用(PDFを一時ディレクトリに保存し文書IDで参照する方式は [0019](0019-aws-deployment.md) で廃止し、毎回PDFを送るステートレス方式に置き換え)
+- ステータス: 採用(PDFを一時ディレクトリに保存し文書IDで参照する方式は [0019](0019-aws-deployment.md) で廃止し、毎回PDFを送るステートレス方式に置き換え。UI を単一HTML・ビルド不要とする方針は [0027](0027-frontend-react-typescript.md) で React + TypeScript に置き換え)
 - 日付: 2026-09-23
 
 ## コンテキスト

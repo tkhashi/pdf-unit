@@ -19,6 +19,11 @@ PKG="$OUT/lambda"
 rm -rf "$PKG" "$OUT/lambda.zip"
 mkdir -p "$PKG"
 
+# UI(web/)をビルドして src/pdf_unit/static に出力する(GET / の起動確認に index.html を使うため zip にも入れる。ADR 0029)
+pnpm --dir "$ROOT/web" install --frozen-lockfile
+pnpm --dir "$ROOT/web" build
+[[ -f "$ROOT/src/pdf_unit/static/index.html" ]] || { echo "UI のビルド結果 (src/pdf_unit/static/index.html) がない" >&2; exit 1; }
+
 # ロック済みの依存(開発用を除く)を、arm64 Linux 用のバイナリ wheel だけで入れる
 uv export --project "$ROOT" --frozen --no-dev --no-emit-project --no-hashes -q -o "$OUT/requirements.txt"
 uv pip install -q -r "$OUT/requirements.txt" --target "$PKG" \
