@@ -15,7 +15,7 @@ import resource
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -44,6 +44,9 @@ MAX_PNG_BASE64_CHARS = int(5.5 * 1024 * 1024)
 _MIN_RESOLUTION = 36
 _MAX_RESOLUTION = 600
 _MAX_THUMBS_PER_REQUEST = 10
+# 埋め込み画像のまとめ取得(/api/page/images)で1回に PNG 化する画像の数の既定値と上限(ADR 0032)
+_DEFAULT_IMAGES_PER_REQUEST = 100
+_MAX_IMAGES_PER_REQUEST = 500
 
 app = FastAPI(title="PDF Unit")
 # 応答を gzip で圧縮する(ADR 0024)。線数の多いページの抽出結果は JSON で6MB(Lambda の応答上限)を超えるが、
@@ -229,7 +232,7 @@ def _render_thumbnails(data: bytes, width: int) -> list[dict]:
     return thumbs
 
 
-def _images(data: bytes, page_no: int, png_indices: tuple[int, ...] = ()) -> PageImages:
+def _images(data: bytes, page_no: int, png_indices: Container[int] = ()) -> PageImages:
     """埋め込み画像の配置情報と、png_indices で指定した画像の PNG(既定は PNG 化しない)。"""
     with _pdfium_locked(), stage("images"):
         return extract_page_images(data, page_no, png_indices)
@@ -338,6 +341,41 @@ def embedded_image(response: Response, index: int, data: bytes = Depends(pdf_bod
         encoded = _downscale_png(pngs[index])
     _set_timing_headers(response, timings)
     return {"png_base64": encoded}
+
+
+@app.post("/api/page/images")
+def embedded_images(
+    response: Response,
+    start: int = 0,
+    count: int = _DEFAULT_IMAGES_PER_REQUEST,
+    data: bytes = Depends(pdf_body),
+) -> dict:
+    """埋め込み画像 start 番以降の画像データをまとめて返す(ADR 0032)。
+
+    1回のページ走査で最大 count 枚を PNG 化し、base64 の合計が応答上限(MAX_PNG_BASE64_CHARS)に収まるところで
+    区切る。続きがあれば next に次の画像番号を返す(無ければ null)。各画像の png_base64 は
+    /api/page/images/{k} と同じ処理で作るので、バイト単位で同じになる。
+    """
+    count = max(1, min(count, _MAX_IMAGES_PER_REQUEST))
+    with collect() as timings:
+        with _open_page(data, _PAGE):
+            pass
+        page_images = _images(data, _PAGE, png_indices=range(start, start + count))
+        total = len(page_images.records)
+        if not 0 <= start < max(total, 1):
+            raise HTTPException(status_code=404, detail="image not found")
+        images, size, index = [], 0, start
+        while index in page_images.pngs:
+            encoded = _downscale_png(page_images.pngs[index])
+            # 1枚目は必ず含める(1枚ずつは _downscale_png で上限内に収まっている)
+            if images and size + len(encoded) > MAX_PNG_BASE64_CHARS:
+                break
+            images.append({"index": index, "png_base64": encoded})
+            size += len(encoded)
+            index += 1
+        metric("images_returned", len(images))
+    _set_timing_headers(response, timings)
+    return {"images": images, "total": total, "next": index if index < total else None}
 
 
 def main() -> None:
