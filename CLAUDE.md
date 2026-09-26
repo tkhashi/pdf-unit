@@ -21,6 +21,17 @@
 - `main` へのマージは本番デプロイになる。ユーザーが明示的に指示したときのみ、`gh pr create --base main --head development` → `gh pr merge --merge` で行う
 - PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書く
 - `.claude/hooks/guard-git.sh` がこれらに反する操作を拒否・確認する。フックに止められたら迂回せず、ルールに沿ったやり方に直す(README「開発の進め方」、ADR 0022)
+- `development` 向けの PR には種別に応じたラベルを付ける(`feat` → `enhancement`、`fix` → `bug`、`docs` → `documentation`)。自動生成のリリースノートの分類に使う
+
+## バージョン
+
+版は `vX.Y.Z` で、正は Git のタグ(ADR 0033)。`main` へのマージ(本番デプロイ)のたびに、デプロイのワークフローがタグと GitHub のリリース(自動生成のリリースノート)を作り、画面のツールバーにも版を表示する。版を書いたファイルは更新しない。
+
+- **2桁目(Y)**: `main` へのマージのたびに上げる(既定)。リリース PR にラベルを付けなければこれになる
+- **3桁目(Z)**: 機能の追加・変更がなく、バグ修正や UI のレイアウト調整のような軽微な変更だけのリリースのときに上げる。エージェントはリリース PR の内容を確認し、該当すれば `semver:patch` ラベルを付ける
+- **1桁目(X)**: よほど大きな変更があり、ユーザーが判断したときだけ上げる。ユーザーの指示があるときだけ `semver:major` ラベルを付ける(エージェントの判断では付けない)
+- リリース PR(`development` → `main`)には必ず `release` ラベルを付ける(リリースノートの一覧から除くため)。例: `gh pr create --base main --head development --label release [--label semver:patch]`
+- 上げる桁はマージの時点のラベルで決まる。ラベルを付け忘れたまま `main` にマージしない
 
 ## 開発時の注意
 
