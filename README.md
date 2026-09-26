@@ -45,7 +45,7 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 2. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
 3. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
 4. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
-5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・同梱ライブラリ・API・OAC)
+5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・同梱ライブラリ・API・応答の gzip 圧縮・OAC)
 
 AWS のリソース(S3・Lambda・CloudFront・このワークフローが引き受けるロール)は別リポジトリ `pdf-unit.infra` が定義し、そちらは手動でデプロイします。初回の準備(リポジトリ変数の登録など)は `pdf-unit.infra` の README「アプリのデプロイ」を参照してください。
 
@@ -155,6 +155,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 - ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIは切り出したPDFごとに計算し、1ページ分の切り出し結果は直近6ページ分を使い回します
 - 1回に送るPDF(切り出したページ)の上限は 4MB(4 × 1024 × 1024 バイト)です。PDF全体の大きさには上限がありません。UIは超過するページを送らずにエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
 - 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
+- `Accept-Encoding: gzip` を付けたリクエストには、応答を gzip(圧縮レベル4)で圧縮して返します(ブラウザは自動で付け、自動で展開します)。線数の多いページの抽出結果は JSON で6MBを超えることがありますが、圧縮すると1/6前後になり Lambda の上限に収まります(ADR 0024)。CloudFront を通しても圧縮が効いていることは `scripts/smoke_test.sh` で確かめます
 - ページ・画像番号が範囲外の場合は 404 を返します
 - `/api/*` の応答には、処理区間ごとの所要時間を示す `Server-Timing` ヘッダーと、件数などを JSON で示す `X-Perf-Metrics` ヘッダーが付きます(「性能の計測」参照)
 
@@ -166,9 +167,9 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
   - `/api/page/lines`: `open`(PDFを開く)・`parse`(pdfminer によるページの解析)・`vectors`(線の抽出)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.cid`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)
   - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
   - `/api/page/images/{k}`: `open`・`images`・`downscale`
-- **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
+- **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`(圧縮後の転送される大きさ)・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
 - **ブラウザのコンソール**: `console.debug`(DevTools の Console で Verbose を有効にすると表示)に、API 呼び出しごとの所要時間・送受信サイズ・`Server-Timing`、ページ切り出しの時間、ページ切替からの経過(線データ受信・描画準備完了・初回描画完了・原本画像表示)を出します
-- **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します
+- **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します。ブラウザと同じく `Accept-Encoding: gzip` を付けて送り、応答の大きさは展開後(`resp_bytes`)・転送される大きさ(`wire_bytes`)・Lambda の上限と比べる大きさの推定(`lambda_bytes`。圧縮した応答は Lambda Web Adapter が base64 化するため4/3倍)を記録します
 
 ```sh
 uv run python scripts/profile_pages.py 図面.pdf --pages 1-5 --out result.jsonl
