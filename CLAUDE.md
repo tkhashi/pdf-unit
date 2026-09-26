@@ -14,6 +14,14 @@
 
 `README.md` と `docs/` 配下のMarkdownは通常の丁寧な日本語で記述する(原始人モード等の圧縮口調は適用しない)。
 
+## ブランチと PR
+
+- 作業を始めるときは `development` から `feat-`/`fix-`/`docs-` + 英小文字・数字・ハイフンの名前でブランチを作る(例: `feat-thumbnail-cache`)。`main`・`development` に直接コミット・push しない
+- 作業が終わったら `/pr` skill(`.claude/skills/pr/SKILL.md`)で `development` 向けの PR を作成し、squash マージする
+- `main` へのマージは本番デプロイになる。ユーザーが明示的に指示したときのみ、`gh pr create --base main --head development` → `gh pr merge --merge` で行う
+- PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書く
+- `.claude/hooks/guard-git.sh` がこれらに反する操作を拒否・確認する。フックに止められたら迂回せず、ルールに沿ったやり方に直す(README「開発の進め方」、ADR 0022)
+
 ## 開発時の注意
 
 - PDFium(pypdfium2、pdfplumber の `page.to_image` を含む)はスレッドセーフではない。PDFium を使う処理を追加する場合は必ず `server.py` の `_pdfium_lock` の中で行う(ADR 0011)

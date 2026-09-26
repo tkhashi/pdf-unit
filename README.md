@@ -17,6 +17,26 @@ uv run pdf-unit
 
 AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Adapter + `uvicorn pdf_unit.server:app` として実行します。静的ファイル(`index.html`・`vendor/`)は S3 から配信します。
 
+## 開発の進め方
+
+ブランチは次の構成で運用します(ADR 0022)。
+
+- `development`(既定ブランチ): 開発中の変更を集めるブランチ。直接コミット・push はせず、PR でのみ変更します
+- `main`: 本番。`main` への反映はそのまま AWS へのデプロイになる(「デプロイ」参照)ため、手動で行うか、エージェントには明示的に指示したときのみ行わせます
+- 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)
+
+作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。
+
+ルールと、それを守らせる仕組みの置き場所は次のとおりです。
+
+| 置き場所 | 役割 |
+| --- | --- |
+| GitHub のルールセット・リポジトリ設定 | 既定ブランチ、`main`・`development` への直接 push・force push・削除の禁止、PR 必須。人とエージェントの双方に効く最終的な防衛線 |
+| `.github/pull_request_template.md` | PR 本文の型。GitHub の画面から作る場合にも使われる |
+| `CLAUDE.md`「ブランチと PR」 | エージェントが常に読むルールの要約 |
+| `.claude/skills/pr/SKILL.md` | エージェントが `development` 向け PR を作成・マージする手順(`/pr`) |
+| `.claude/settings.json`・`.claude/hooks/guard-git.sh` | エージェントの git/gh 操作を実行前に検査するフック。保護ブランチへの直接コミット・push、`--force`、命名規則違反のブランチ作成は拒否し、`main` 向けの PR 作成・マージと `main` 上での `git merge` はユーザーに確認を求める |
+
 ## デプロイ
 
 `main` にマージすると、GitHub Actions(`.github/workflows/deploy.yml`)が AWS へ自動で反映します(ADR 0021)。
@@ -151,6 +171,10 @@ scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
 .github/workflows/deploy.yml  main へのマージで AWS へ反映
+.github/pull_request_template.md  PR 本文のテンプレート
+.claude/settings.json  Claude Code のフック設定(ブランチ運用の検査)
+.claude/hooks/guard-git.sh  git/gh 操作を検査するフック
+.claude/skills/pr/   development 向け PR の作成・マージ手順(エージェント用)
 docs/adr/          設計判断の記録
 ```
 
