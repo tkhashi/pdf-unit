@@ -15,7 +15,39 @@ uv run pdf-unit
 
 ブラウザで http://127.0.0.1:8000 を開き、PDFをドラッグ&ドロップするか「開く」から選択します。`uv run pdf-unit` はサーバーを `127.0.0.1` のみで待ち受けます。
 
-AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Adapter + `uvicorn pdf_unit.server:app` として実行します(インフラ定義は別リポジトリ。方針は [ADR 0019](docs/adr/0019-aws-deployment.md))。
+AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Adapter + `uvicorn pdf_unit.server:app` として実行します。静的ファイル(`index.html`・`vendor/`)は S3 から配信します。
+
+## デプロイ
+
+`main` にマージすると、GitHub Actions(`.github/workflows/deploy.yml`)が AWS へ自動で反映します(ADR 0021)。
+
+1. `scripts/build_lambda.sh` で Lambda 用の zip(`dist/lambda.zip`)を組み立てる
+2. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
+3. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
+4. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
+5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・同梱ライブラリ・API・OAC)
+
+AWS のリソース(S3・Lambda・CloudFront・このワークフローが引き受けるロール)は別リポジトリ `pdf-unit.infra` が定義し、そちらは手動でデプロイします。初回の準備(リポジトリ変数の登録など)は `pdf-unit.infra` の README「アプリのデプロイ」を参照してください。
+
+必要なリポジトリ変数(Settings → Secrets and variables → Actions → Variables。値は infra の `cdk deploy` の出力): `AWS_REGION`・`AWS_DEPLOY_ROLE_ARN`・`LAMBDA_FUNCTION_NAME`・`SITE_BUCKET_NAME`・`DISTRIBUTION_ID`・`SITE_URL`。Secrets は不要です。
+
+### infra との約束事
+
+zip の中身と infra の Lambda 定義は次の点で一致している必要があります。どちらかを変える場合は、もう一方も合わせてください。
+
+| 項目 | アプリ側(`scripts/build_lambda.sh`) | infra 側(`PdfUnitStack` の Lambda) |
+| --- | --- | --- |
+| Python の版 | 3.13 用の wheel を入れる | ランタイム `python3.13` |
+| アーキテクチャ | `aarch64-manylinux_2_34` の wheel を入れる | `arm64` |
+| 起動 | zip 直下の `run.sh` が `uvicorn pdf_unit.server:app --host 127.0.0.1 --port ${PORT:-8080}` を実行 | ハンドラー `run.sh`、Lambda Web Adapter レイヤー、`AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap`、`PORT=8080` |
+| 起動確認 | `GET /` が 200 を返す | Lambda Web Adapter の既定の確認先 `GET /` |
+
+手元での確認:
+
+```sh
+scripts/build_lambda.sh                            # dist/lambda.zip を作る
+scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動したサーバーに対して確認
+```
 
 ## 画面構成
 
@@ -115,6 +147,10 @@ src/pdf_unit/
   calibration.py   線幅補正(ClassifierArchDrawingByJev から移植)
   static/index.html  UI(HTML/CSS/JS 1ファイル、ビルド不要)
   static/vendor/     同梱ライブラリ(pdf-lib 1.17.1、MIT)
+scripts/
+  build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
+  smoke_test.sh    デプロイ後の動作確認
+.github/workflows/deploy.yml  main へのマージで AWS へ反映
 docs/adr/          設計判断の記録
 ```
 

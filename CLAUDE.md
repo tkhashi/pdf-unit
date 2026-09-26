@@ -18,4 +18,5 @@
 
 - PDFium(pypdfium2、pdfplumber の `page.to_image` を含む)はスレッドセーフではない。PDFium を使う処理を追加する場合は必ず `server.py` の `_pdfium_lock` の中で行う(ADR 0011)
 - 座標は pdfplumber の表示座標(左上原点、pt、ページ回転反映後)に統一する。PDFium から得た座標は `FPDF_PageToDevice` で変換する(ADR 0010)
+- Lambda の実行環境に関わる値(Python の版・アーキテクチャ・zip 直下の `run.sh`・待ち受けポート・`GET /` の起動確認)は `pdf-unit.infra` の Lambda 定義との約束事。`scripts/build_lambda.sh` でこれらを変える場合は、infra 側も合わせて変更する(README「infra との約束事」、ADR 0021)
 - 動作確認でサーバーを起動するときは、ユーザーが使っている `127.0.0.1:8000` と衝突しないよう別ポート(例: `.venv/bin/uvicorn pdf_unit.server:app --port 8765`)を使い、停止は自分が起動したプロセスの PID を指定して行う(`pkill -f` で名前一致させると、ユーザーのサーバーまで止めてしまう)
