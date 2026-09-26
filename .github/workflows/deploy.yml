@@ -46,7 +46,8 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv はメジャー版のタグ(v10)を公開していないため、完全な版で指定する
+      - uses: astral-sh/setup-uv@v10.2.0
 
       - name: Build Lambda zip
         run: scripts/build_lambda.sh
