@@ -27,7 +27,7 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 
 - `development`(既定ブランチ): 開発中の変更を集めるブランチ。直接コミット・push はせず、PR でのみ変更します
 - `main`: 本番。`main` への反映はそのまま AWS へのデプロイになる(「デプロイ」参照)ため、手動で行うか、エージェントには明示的に指示したときのみ行わせます
-- 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)
+- 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)。作業は `git worktree add ~/.claude/worktrees/pdf-unit-<ブランチ名> -b <ブランチ名> origin/development` で作った専用の作業ディレクトリで行い、主のチェックアウトでブランチを切り替えません
 
 作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。`development` 向けの PR には種別に応じたラベル(`feat` → `enhancement`、`fix` → `bug`、`docs` → `documentation`)を付けます(自動生成のリリースノートの分類に使います)。
 
