@@ -20,6 +20,8 @@ from typing import Literal
 import pdfplumber
 from PIL import Image
 
+from .timing import metric, stage
+
 VectorRecord = dict  # pdfplumberのオブジェクトdict(object_type, x0, top, linewidth等)をそのまま受け取る
 
 _BACKGROUND_THRESHOLD = 220  # グレースケール明度がこれ以上なら背景(白)とみなす
@@ -267,9 +269,12 @@ def calibrate_linewidth(
     }
     min_required = _min_required_samples(len(distinct_linewidths))
 
-    candidates = _select_isolated_straight_samples(
-        records, page.width, page.height, max_samples
-    )
+    metric("calib_records", len(records))
+    with stage("calib.select"):
+        candidates = _select_isolated_straight_samples(
+            records, page.width, page.height, max_samples
+        )
+    metric("calib_candidates", len(candidates))
     if len(candidates) < min_required:
         return CalibrationResult(
             scale=1.0,
@@ -278,20 +283,23 @@ def calibrate_linewidth(
             method="fallback_no_samples",
         )
 
-    raster = page.to_image(resolution=resolution).original.convert("L")
+    with stage("calib.render"):
+        raster = page.to_image(resolution=resolution).original.convert("L")
+    metric("calib_render_px", raster.width * raster.height)
     px_per_pt = resolution / 72.0
 
     ratios: list[float] = []
     used_linewidths: set[float] = set()
-    for segment in candidates:
-        measured_px = _measure_stroke_width_px(raster, segment, px_per_pt)
-        if measured_px is None:
-            continue
-        measured_pt = measured_px / px_per_pt
-        ratio = measured_pt / segment.linewidth
-        if _RATIO_MIN <= ratio <= _RATIO_MAX:
-            ratios.append(ratio)
-            used_linewidths.add(round(segment.linewidth, 3))
+    with stage("calib.measure"):
+        for segment in candidates:
+            measured_px = _measure_stroke_width_px(raster, segment, px_per_pt)
+            if measured_px is None:
+                continue
+            measured_pt = measured_px / px_per_pt
+            ratio = measured_pt / segment.linewidth
+            if _RATIO_MIN <= ratio <= _RATIO_MAX:
+                ratios.append(ratio)
+                used_linewidths.add(round(segment.linewidth, 3))
 
     if len(ratios) < min_required:
         return CalibrationResult(

@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import math
+import resource
+import sys
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pdfplumber
 import pypdfium2 as pdfium
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -24,6 +30,7 @@ from PIL import Image
 from .calibration import calibrate_linewidth
 from .extract import extract_page_lines, extract_page_texts
 from .raster import PageImages, extract_page_images
+from .timing import Timings, add_metric, collect, metric, server_timing_header, stage
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -47,6 +54,75 @@ app.mount("/vendor", StaticFiles(directory=_STATIC_DIR / "vendor"), name="vendor
 # (page.to_image / 線幅キャリブレーション / cid文字補完 / 埋め込み画像抽出 / サムネイル)は
 # このロックで直列化する。page_lines内から_imagesを呼ぶため再入可能なRLockにする。
 _pdfium_lock = threading.RLock()
+
+
+@contextmanager
+def _pdfium_locked() -> Iterator[None]:
+    """_pdfium_lock を保持する。ロックの待ち時間を計測区間 lock_wait として記録する(ADR 0023)。"""
+    with stage("lock_wait"):
+        _pdfium_lock.acquire()
+    try:
+        yield
+    finally:
+        _pdfium_lock.release()
+
+
+# ---- 計測ログ(ADR 0023) ----
+# APIリクエストごとに、所要時間の内訳(Server-Timing)・サイズ・メモリを1行のJSONで標準出力へ書く。
+# Lambda では CloudWatch Logs に入り、Logs Insights で集計できる
+_cold = True  # プロセスが最初に受けるリクエストか(Lambda のコールドスタートの判定)
+
+
+def _maxrss_mb() -> float:
+    # ru_maxrss は macOS ではバイト、Linux では KB
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(rss / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
+
+
+def _rss_mb() -> float | None:
+    try:
+        with open("/proc/self/statm") as f:  # Linux(Lambda)のみ
+            return round(int(f.read().split()[1]) * resource.getpagesize() / (1024 * 1024), 1)
+    except OSError:
+        return None
+
+
+def _parse_server_timing(value: str) -> dict[str, float]:
+    stages = {}
+    for entry in filter(None, (e.strip() for e in value.split(","))):
+        name, _, dur = entry.partition(";dur=")
+        stages[name] = float(dur)
+    return stages
+
+
+@app.middleware("http")
+async def perf_log(request: Request, call_next):
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    global _cold
+    cold, _cold = _cold, False
+    start = time.perf_counter()
+    response = await call_next(request)
+    record = {
+        "perf": request.url.path,
+        "query": str(request.url.query),
+        "status": response.status_code,
+        "cold": cold,
+        "total_ms": round((time.perf_counter() - start) * 1000, 1),
+        "req_bytes": int(request.headers.get("content-length") or 0),
+        "resp_bytes": int(response.headers.get("content-length") or 0),
+        "stages_ms": _parse_server_timing(response.headers.get("server-timing", "")),
+        "metrics": json.loads(response.headers.get("x-perf-metrics", "{}")),
+        "maxrss_mb": _maxrss_mb(),
+        "rss_mb": _rss_mb(),
+    }
+    print(json.dumps(record, ensure_ascii=False), flush=True)
+    return response
+
+
+def _set_timing_headers(response: Response, timings: Timings) -> None:
+    response.headers["Server-Timing"] = server_timing_header(timings)
+    response.headers["X-Perf-Metrics"] = json.dumps(timings.metrics, separators=(",", ":"))
 
 
 async def pdf_body(request: Request) -> bytes:
@@ -75,6 +151,17 @@ def _check_page(pdf: pdfplumber.PDF, page_no: int) -> pdfplumber.page.Page:
     return pdf.pages[page_no]
 
 
+@contextmanager
+def _open_page(data: bytes, page_no: int) -> Iterator[pdfplumber.page.Page]:
+    """PDFを開いてページを返す(閉じるのは with を抜けるとき)。開く処理を計測区間 open として記録する。"""
+    with stage("open"):
+        pdf = _open_pdf(data)
+    with pdf:
+        with stage("open"):
+            page = _check_page(pdf, page_no)
+        yield page
+
+
 def _png_bytes(image: Image.Image) -> bytes:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
@@ -92,12 +179,17 @@ def _shrink_factor(b64_len: int) -> float:
 
 def _render_page(data: bytes, page_no: int, resolution: int) -> tuple[int, str]:
     """ページ画像をレンダリングする。base64が上限を超える場合は解像度を下げて描き直し、実際の解像度を返す。"""
-    with _open_pdf(data) as pdf:
-        page = _check_page(pdf, page_no)
+    with _open_page(data, page_no) as page:
         while True:
-            with _pdfium_lock:
+            add_metric("render_attempts", 1)
+            with _pdfium_locked(), stage("render"):
                 image = page.to_image(resolution=resolution).original
-            encoded = _b64(_png_bytes(image))
+            metric("render_px", image.width * image.height)
+            with stage("png"):
+                png = _png_bytes(image)
+            with stage("b64"):
+                encoded = _b64(png)
+            metric("resolution", resolution)
             if len(encoded) <= MAX_PNG_BASE64_CHARS or resolution <= _MIN_RESOLUTION:
                 return resolution, encoded
             shrunk = int(resolution * _shrink_factor(len(encoded)))
@@ -108,24 +200,30 @@ def _render_thumbnails(data: bytes, width: int) -> list[dict]:
     """ボディのPDFの各ページ(最大 _MAX_THUMBS_PER_REQUEST)の縮小画像(線検出なし)。大判図面では数dpi相当になるため、
     dpi指定ではなく出力幅から倍率を決める。"""
     thumbs = []
-    with _pdfium_lock:
+    with _pdfium_locked():
         try:
-            pdf = pdfium.PdfDocument(data)
+            with stage("open"):
+                pdf = pdfium.PdfDocument(data)
         except pdfium.PdfiumError as e:
             raise HTTPException(status_code=400, detail=f"invalid PDF: {e}") from e
         try:
             for page_no in range(min(len(pdf), _MAX_THUMBS_PER_REQUEST)):
-                page = pdf[page_no]
-                # get_widthは回転(/Rotate)反映後の表示幅。renderも回転を反映する
-                image = page.render(scale=width / page.get_width()).to_pil()
-                thumbs.append({"page": page_no, "png_base64": _b64(_png_bytes(image))})
+                with stage("render"):
+                    page = pdf[page_no]
+                    # get_widthは回転(/Rotate)反映後の表示幅。renderも回転を反映する
+                    image = page.render(scale=width / page.get_width()).to_pil()
+                with stage("png"):
+                    png = _png_bytes(image)
+                with stage("b64"):
+                    thumbs.append({"page": page_no, "png_base64": _b64(png)})
         finally:
             pdf.close()
+    metric("thumbs", len(thumbs))
     return thumbs
 
 
 def _images(data: bytes, page_no: int) -> PageImages:
-    with _pdfium_lock:
+    with _pdfium_locked(), stage("images"):
         return extract_page_images(data, page_no)
 
 
@@ -134,13 +232,15 @@ def _downscale_png(png: bytes) -> str:
     encoded = _b64(png)
     if len(encoded) <= MAX_PNG_BASE64_CHARS:
         return encoded
-    image = Image.open(io.BytesIO(png))
-    image.load()
-    while len(encoded) > MAX_PNG_BASE64_CHARS and min(image.size) > 1:
-        factor = _shrink_factor(len(encoded))
-        size = (max(1, int(image.width * factor)), max(1, int(image.height * factor)))
-        image = image.resize(size, Image.Resampling.LANCZOS)
-        encoded = _b64(_png_bytes(image))
+    with stage("downscale"):
+        image = Image.open(io.BytesIO(png))
+        image.load()
+        while len(encoded) > MAX_PNG_BASE64_CHARS and min(image.size) > 1:
+            add_metric("downscale_attempts", 1)
+            factor = _shrink_factor(len(encoded))
+            size = (max(1, int(image.width * factor)), max(1, int(image.height * factor)))
+            image = image.resize(size, Image.Resampling.LANCZOS)
+            encoded = _b64(_png_bytes(image))
     return encoded
 
 
@@ -153,25 +253,38 @@ def index() -> FileResponse:
 _PAGE = 0
 
 
+# 各APIは所要時間の内訳を Server-Timing、件数などを X-Perf-Metrics ヘッダーで返す(ADR 0023)
 @app.post("/api/thumbs")
-def page_thumbnails(width: int = 160, data: bytes = Depends(pdf_body)) -> dict:
+def page_thumbnails(response: Response, width: int = 160, data: bytes = Depends(pdf_body)) -> dict:
     """ボディのPDFの全ページ(最大10)のサムネイル。page はボディ内でのページ番号。"""
     width = max(60, min(width, 400))
-    return {"thumbs": _render_thumbnails(data, width)}
+    with collect() as timings:
+        thumbs = _render_thumbnails(data, width)
+    _set_timing_headers(response, timings)
+    return {"thumbs": thumbs}
 
 
 @app.post("/api/page/lines")
-def page_lines(data: bytes = Depends(pdf_body)) -> dict:
-    with _open_pdf(data) as pdf:
-        page = _check_page(pdf, _PAGE)
-        lines = extract_page_lines(page)  # pdfplumberのみ(PDFium不使用)なのでロック外
-        with _pdfium_lock:
-            # 報告linewidthと実描画太さの比(ハイライト幅を実際の線の太さに合わせるため)
-            calib = calibrate_linewidth(page, page.lines + page.rects + page.curves)
-            texts = extract_page_texts(page, data, _PAGE)
+def page_lines(response: Response, data: bytes = Depends(pdf_body)) -> dict:
+    with collect() as timings, _open_page(data, _PAGE) as page:
+        with stage("parse"):
+            page.objects  # pdfminerによるページの解析(結果はpdfplumberが保持し、以降の抽出で使い回す)
+        with stage("vectors"):
+            lines = extract_page_lines(page)  # pdfplumberのみ(PDFium不使用)なのでロック外
+        with _pdfium_locked():
+            with stage("calib"):
+                # 報告linewidthと実描画太さの比(ハイライト幅を実際の線の太さに合わせるため)
+                calib = calibrate_linewidth(page, page.lines + page.rects + page.curves)
+            with stage("texts"):
+                texts = extract_page_texts(page, data, _PAGE)
             images = _images(data, _PAGE).records
         # UIがpdf-libで求めたページ寸法と食い違った場合に合わせられるよう、座標系の基準となる寸法も返す
         size = {"width": page.width, "height": page.height}
+        metric("page_pt", f"{page.width:g}x{page.height:g}")
+        metric("lines", len(lines))
+        metric("texts", len(texts))
+        metric("images", len(images))
+    _set_timing_headers(response, timings)
     return {
         "page": size,
         "linewidth_scale": calib.scale,
@@ -183,20 +296,25 @@ def page_lines(data: bytes = Depends(pdf_body)) -> dict:
 
 
 @app.post("/api/page/image")
-def page_image(resolution: int = 150, data: bytes = Depends(pdf_body)) -> dict:
+def page_image(response: Response, resolution: int = 150, data: bytes = Depends(pdf_body)) -> dict:
     resolution = max(_MIN_RESOLUTION, min(resolution, _MAX_RESOLUTION))
-    actual, encoded = _render_page(data, _PAGE, resolution)
+    with collect() as timings:
+        actual, encoded = _render_page(data, _PAGE, resolution)
+    _set_timing_headers(response, timings)
     return {"resolution": actual, "png_base64": encoded}
 
 
 @app.post("/api/page/images/{index}")
-def embedded_image(index: int, data: bytes = Depends(pdf_body)) -> dict:
-    with _open_pdf(data) as pdf:
-        _check_page(pdf, _PAGE)
-    pngs = _images(data, _PAGE).pngs
-    if not 0 <= index < len(pngs):
-        raise HTTPException(status_code=404, detail="image not found")
-    return {"png_base64": _downscale_png(pngs[index])}
+def embedded_image(response: Response, index: int, data: bytes = Depends(pdf_body)) -> dict:
+    with collect() as timings:
+        with _open_page(data, _PAGE):
+            pass
+        pngs = _images(data, _PAGE).pngs
+        if not 0 <= index < len(pngs):
+            raise HTTPException(status_code=404, detail="image not found")
+        encoded = _downscale_png(pngs[index])
+    _set_timing_headers(response, timings)
+    return {"png_base64": encoded}
 
 
 def main() -> None:

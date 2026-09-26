@@ -156,6 +156,30 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 - 1回に送るPDF(切り出したページ)の上限は 4MB(4 × 1024 × 1024 バイト)です。PDF全体の大きさには上限がありません。UIは超過するページを送らずにエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
 - 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
 - ページ・画像番号が範囲外の場合は 404 を返します
+- `/api/*` の応答には、処理区間ごとの所要時間を示す `Server-Timing` ヘッダーと、件数などを JSON で示す `X-Perf-Metrics` ヘッダーが付きます(「性能の計測」参照)
+
+## 性能の計測
+
+高速化は、計測で支配的と分かった箇所から、出力(応答ボディ)が変わらない範囲で行います([ADR 0023](docs/adr/0023-performance-measurement.md))。計測の仕組みは次の4つです。
+
+- **`Server-Timing` / `X-Perf-Metrics` ヘッダー**: 区間の所要時間(ミリ秒)と件数です。区間名の `.` は内訳を表し(`calib.render` は `calib` の内訳)、`.` を含まない区間の合計がその API の処理時間の目安になります。`lock_wait` は PDFium のロック待ちの時間です
+  - `/api/page/lines`: `open`(PDFを開く)・`parse`(pdfminer によるページの解析)・`vectors`(線の抽出)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.cid`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)
+  - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
+  - `/api/page/images/{k}`: `open`・`images`・`downscale`
+- **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
+- **ブラウザのコンソール**: `console.debug`(DevTools の Console で Verbose を有効にすると表示)に、API 呼び出しごとの所要時間・送受信サイズ・`Server-Timing`、ページ切り出しの時間、ページ切替からの経過(線データ受信・描画準備完了・初回描画完了・原本画像表示)を出します
+- **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します
+
+```sh
+uv run python scripts/profile_pages.py 図面.pdf --pages 1-5 --out result.jsonl
+uv run python scripts/profile_pages.py 図面.pdf --pages 3 --dump out/after   # 応答ボディを保存(変更前後を cmp で比較)
+uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # cProfile を保存(時間の計測とは別に実行)
+```
+
+- 1回の API 呼び出しごとに子プロセスを起動し、ASGI アプリに直接 POST します(Depends・JSON 直列化・ミドルウェアを含む実際の経路)。子プロセスの最大メモリを、その呼び出しのピークメモリとみなします
+- ページの切り出しは UI と同じく同梱の pdf-lib を Node.js で動かして行います。Node.js が無い場合は pypdfium2 で切り出しますが、UI が送るバイト列とは異なるため、計測値の比較には注意してください
+- 計測する API は `--endpoints`(既定 `lines,image,images,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)、1ページで計測する埋め込み画像の数は `--max-images`(既定3、0で全件)で指定します
+- 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
 ## ファイル構成
 
@@ -165,11 +189,13 @@ src/pdf_unit/
   extract.py       線・文字の抽出(pdfplumber)、cid文字補完、フォントサイズ逆算
   raster.py        埋め込み画像の抽出(PDFium)、座標変換
   calibration.py   線幅補正(ClassifierArchDrawingByJev から移植)
+  timing.py        性能計測(処理区間の所要時間・件数の収集)
   static/index.html  UI(HTML/CSS/JS 1ファイル、ビルド不要)
   static/vendor/     同梱ライブラリ(pdf-lib 1.17.1、MIT)
 scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
+  profile_pages.py ページごとの API の性能計測
 .github/workflows/deploy.yml  main へのマージで AWS へ反映
 .github/pull_request_template.md  PR 本文のテンプレート
 .claude/settings.json  Claude Code のフック設定(ブランチ運用の検査)
