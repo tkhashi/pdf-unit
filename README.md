@@ -170,6 +170,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 | POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
 | POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
+| POST | `/api/page/images?start=&count=` | 埋め込み画像 `start` 番以降の画像データをまとめて返す(`count` は既定100・上限500)。base64 の合計が5.5MB に収まるところで区切る。`{images: [{index, png_base64}], total, next}`(`next` は続きの画像番号、無ければ `null`)。各画像は `/api/page/images/{k}` とバイト単位で同じ([ADR 0032](docs/adr/0032-embedded-images-batch-api.md)) |
 | GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
 | GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
 
@@ -189,7 +190,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 - **`Server-Timing` / `X-Perf-Metrics` ヘッダー**: 区間の所要時間(ミリ秒)と件数です。区間名の `.` は内訳を表し(`calib.render` は `calib` の内訳)、`.` を含まない区間の合計がその API の処理時間の目安になります。`lock_wait` は PDFium のロック待ちの時間です
   - `/api/page/lines`: `open`(PDFを開く)・`parse`(pdfminer によるページの解析)・`vectors`(線の抽出)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.cid`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)
   - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
-  - `/api/page/images/{k}`: `open`・`images`・`downscale`
+  - `/api/page/images/{k}`・`/api/page/images`: `open`・`images`・`downscale`
 - **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`(圧縮後の転送される大きさ)・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
 - **ブラウザのコンソール**: `console.debug`(DevTools の Console で Verbose を有効にすると表示)に、API 呼び出しごとの所要時間・送受信サイズ・`Server-Timing`、ページ切り出しの時間、ページ切替からの経過(線データ受信・描画準備完了・初回描画完了・原本画像表示)を出します
 - **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します。ブラウザと同じく `Accept-Encoding: gzip` を付けて送り、応答の大きさは展開後(`resp_bytes`)・転送される大きさ(`wire_bytes`)・Lambda の上限と比べる大きさの推定(`lambda_bytes`。圧縮した応答は Lambda Web Adapter が base64 化するため4/3倍)を記録します
