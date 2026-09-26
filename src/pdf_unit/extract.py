@@ -1,25 +1,19 @@
 """PDFページから線(line/rect/curve)と文字(単語単位)を抽出し、UI描画用の最小レコードにする。
 
 参考: ClassifierArchDrawingByJev の extract.py / render.py。
-座標はpdfplumberのtop原点(pt)で、そのままSVGのviewBox座標として使える。
+入力は PdfiumPage(pdfium_page.py。pdfplumber の Page と同じ形のデータ)。座標は表示範囲の左上原点(pt)で、
+そのままSVGのviewBox座標として使える。
 """
 
 from __future__ import annotations
 
-import ast
 import codecs
-import ctypes
 import math
-import re
 import unicodedata
 from typing import Any, TypedDict
 
-import pdfplumber
-import pypdfium2 as pdfium
-import pypdfium2.raw as pdfium_c
-from pdfplumber.utils import extract_words
-
-from .raster import PageToDisplay
+from ._vendor.pdfplumber.utils import extract_words
+from .pdfium_page import PdfiumPage
 from .timing import metric, stage
 
 
@@ -38,7 +32,8 @@ def _clamp255(v: float) -> int:
 
 
 def _color_to_css(color: Any) -> str | None:
-    """pdfplumberの色表現(グレースケール/RGB/CMYK)をCSS色文字列に変換する。"""
+    """色(0〜1の成分。グレースケール/RGB/CMYK)をCSS色文字列に変換する。PdfiumPage の色は PDFium が色空間を
+    変換済みの RGB なので、実際に通るのは RGB の分岐。"""
     if color is None:
         return None
     if isinstance(color, (int, float)):
@@ -66,7 +61,7 @@ def _fmt(p: tuple[float, float]) -> str:
 
 
 def _path_from_commands(path: list[Any]) -> str | None:
-    """pdfplumberの`path`(m/l/c/h)をSVG path dに変換する。ベジェを保持できる。"""
+    """`path`(m/l/c/h)をSVG path dに変換する。ベジェを保持できる(`v`/`y` は PdfiumPage が `c` に直している)。"""
     parts: list[str] = []
     for cmd in path:
         op, pts = cmd[0], cmd[1:]
@@ -143,7 +138,7 @@ def _to_d(obj: dict[str, Any], object_type: str) -> str | None:
     return _path_from_points(obj.get("pts") or [], False)
 
 
-def extract_page_lines(page: pdfplumber.page.Page) -> list[LineRecord]:
+def extract_page_lines(page: PdfiumPage) -> list[LineRecord]:
     """rect/curveを先、lineを後に並べる(SVGで後ろの要素が前面=細かい直線を優先ホバー)。"""
     records: list[LineRecord] = []
     sources = (("rect", page.rects), ("curve", page.curves), ("line", page.lines))
@@ -189,7 +184,7 @@ class TextRecord(TypedDict):
 def _font_size(char: dict[str, Any]) -> float | None:
     """フォントサイズ(Tf)を文字の外接矩形・送り幅・行列から逆算する。
 
-    pdfminerの`matrix`はフォントサイズを含まない(テキスト行列×CTMのみ)。
+    文字の`matrix`はフォントサイズを含まない(テキスト行列×CTMのみ)。
     Tf=1で行列側に拡大を持つPDFでは hypot(a,b) が文字サイズになるが、
     Tf=12・行列=単位行列のようなPDFでは1になってしまうため、
     文字空間での矩形(幅=adv, 高さ=フォントサイズ)を行列で写した外接矩形
@@ -231,11 +226,9 @@ def _glyph(char: dict[str, Any], page_height: float) -> CharGlyph | None:
     }
 
 
-_CID_RE = re.compile(r"\(cid:(\d+)\)")
-_ORIGIN_DECIMALS = 1
 # 復元できなかった文字の表示。本物の「□」と区別するため、文字には unreadable フラグも付ける
 UNREADABLE_CHAR = "□"
-# CID を Unicode とみなしてよいかの判定: フォント内の文字がこの割合以上「よく使われる文字」なら採用
+# 読めるフォントとみなす割合: フォント内の文字がこの割合以上「よく使われる文字」なら読める
 _PLAUSIBLE_RATIO = 0.9
 # よく使われる文字の範囲(ASCII・ラテン・ギリシャ・キリル・記号・かな・CJK統合漢字・ハングル・全角)
 _COMMON_RANGES = (
@@ -248,104 +241,30 @@ def _is_common(code: int) -> bool:
     return any(lo <= code <= hi for lo, hi in _COMMON_RANGES)
 
 
-def _origin_key(x: float, y: float) -> tuple[float, float]:
-    return (round(x, _ORIGIN_DECIMALS), round(y, _ORIGIN_DECIMALS))
+def _mark_unreadable(chars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """ToUnicode の無いフォントの文字を「□」にし、unreadable フラグを付ける(ADR 0038)。
 
-
-def _pdfium_chars_by_origin(pdf_data: bytes, page_no: int) -> dict[tuple[float, float], str]:
-    """PDFiumが解釈した各文字のUnicodeを、文字原点の表示座標(pdfplumberと同じ左上原点・回転反映後)で引けるようにする。
-
-    PDFiumの文字原点は回転前のPDF座標なので、/Rotate のあるページでは pdfplumber と一致しない。
-    埋め込み画像と同じ PageToDisplay で表示座標へ変換してから登録する。
+    PDFium は Unicode に引けない文字を、文字コードをそのまま Unicode とみなした値で返す(区別する API も CID の値も
+    無い)。そうしたフォントの文字は、よく使われる文字の範囲からほとんど外れる。フォント単位で、よく使われる文字が
+    _PLAUSIBLE_RATIO に満たなければ読めないフォントとみなし、その全文字を「□」にする。ToUnicode があっても
+    珍しい文字ばかりのフォントは、読めないフォントとみなされうる。
     """
-    result: dict[tuple[float, float], str] = {}
-    pdf = pdfium.PdfDocument(pdf_data)
-    try:
-        page = pdf[page_no]
-        to_display = PageToDisplay(page)
-        textpage = page.get_textpage()
-        x, y = ctypes.c_double(), ctypes.c_double()
-        for i in range(textpage.count_chars()):
-            if pdfium_c.FPDFText_IsGenerated(textpage.raw, i) == 1:
-                continue  # PDFiumが補った空白・改行(PDF上に実体が無い)
-            code = pdfium_c.FPDFText_GetUnicode(textpage.raw, i)
-            if code in (0, 0xFFFE, 0xFFFF) or not pdfium_c.FPDFText_GetCharOrigin(textpage.raw, i, x, y):
-                continue
-            result.setdefault(_origin_key(*to_display((x.value, y.value))), chr(code))
-    finally:
-        pdf.close()
-    return result
-
-
-def _lookup(table: dict[tuple[float, float], str], x: float, y: float) -> str | None:
-    step = 10**-_ORIGIN_DECIMALS
-    for dx in (0, -step, step):
-        for dy in (0, -step, step):
-            if (u := table.get(_origin_key(x + dx, y + dy))) is not None:
-                return u
-    return None
-
-
-def _restore_cid_chars(
-    chars: list[dict[str, Any]], pdf_data: bytes, page_no: int, page_height: float
-) -> list[dict[str, Any]]:
-    """pdfminerが`(cid:N)`としか出せなかった文字(ToUnicode CMapの無いフォント)を補完する。
-
-    1. PDFiumの文字解釈を文字原点で突き合わせ、PDFiumが chr(CID) 以外の文字を返したものはそれを採用する
-       (PDFiumがフォント内部のcmap等から実際に対応を見つけた場合)
-    2. PDFiumが chr(CID) を返した文字や突き合わせられない文字は根拠が無い(PDFium自身もCIDをそのまま
-       Unicodeとみなしているだけ)。フォント単位で、chr(CID) の大半がよく使われる文字に収まる場合だけ
-       CID=Unicode のフォントとみなして chr(CID) を使う
-    3. それ以外は復元できない文字として「□」にし、unreadable フラグを付ける
-    """
-    cids = [(i, int(m.group(1))) for i, c in enumerate(chars) if (m := _CID_RE.fullmatch(c["text"]))]
-    metric("cid_chars", len(cids))
-    if not cids:
-        return chars
-    table = _pdfium_chars_by_origin(pdf_data, page_no)
+    by_font: dict[Any, list[int]] = {}
+    for i, c in enumerate(chars):
+        by_font.setdefault(c["fontname"], []).append(i)
     fixed = list(chars)
-    pending: dict[str, list[tuple[int, int]]] = {}  # フォント名 -> PDFiumで決まらなかった (index, cid)
-    for i, cid in cids:
-        c = chars[i]
-        matrix = c.get("matrix")
-        # pdfplumberの matrix(e, f) は回転反映後の下原点座標なので、上原点へ直して突き合わせる
-        u = _lookup(table, matrix[4], page_height - matrix[5]) if matrix else None
-        if u is not None and u != chr(cid):
-            fixed[i] = {**c, "text": u}
-        else:
-            pending.setdefault(c["fontname"], []).append((i, cid))
-    for font_chars in pending.values():
-        codes = [cid for _, cid in font_chars]
-        plausible = sum(_is_common(cid) for cid in codes) >= _PLAUSIBLE_RATIO * len(codes)
-        for i, cid in font_chars:
-            if plausible and _is_common(cid):
-                fixed[i] = {**chars[i], "text": chr(cid)}
-            else:
+    marked = 0
+    for indices in by_font.values():
+        if sum(_is_common(ord(chars[i]["text"])) for i in indices) < _PLAUSIBLE_RATIO * len(indices):
+            for i in indices:
                 fixed[i] = {**chars[i], "text": UNREADABLE_CHAR, "unreadable": True}
+            marked += len(indices)
+    metric("unreadable_chars", marked)
     return fixed
 
 
-_BYTES_REPR_RE = re.compile(r"""b(['"]).*\1""", re.DOTALL)
 # BOMで文字コードが明示されている場合(長いBOMから順に照合する)
 _BOMS = ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF16_BE, "utf-16-be"), (codecs.BOM_UTF16_LE, "utf-16-le"))
-
-
-def _raw_font_name(name: Any) -> bytes | str | None:
-    """pdfminerのフォント名を元のバイト列に戻す。UTF-8で読めた名前はstrのまま返す。
-
-    pdfminerはUTF-8で読めない名前を `str(bytes)` にする(`"b'\\x82l...'"`)ので、literal_evalで損失なく戻せる。
-    FontNameが名前でなく文字列オブジェクトの場合はbytesのまま渡ってくる。
-    """
-    if isinstance(name, bytes) or name is None:
-        return name
-    if _BYTES_REPR_RE.fullmatch(name):
-        try:
-            value = ast.literal_eval(name)
-        except (ValueError, SyntaxError):
-            return name
-        if isinstance(value, bytes):
-            return value
-    return name
 
 
 def _strip_bom(raw: bytes) -> tuple[bytes, str | None]:
@@ -392,12 +311,13 @@ def decode_font_names(names: list[Any]) -> dict[Any, str]:
       4. 0x00 を含む偶数長の名前ばかりなら BOM無し UTF-16
       5. 全名前が Shift_JIS(cp932)で読めれば cp932
       6. どれにも当てはまらなければ推測せず PDF の名前表記(`#82`形式)
-    pdfminerがUTF-8で読めた名前も判定に含める(Shift_JISのバイト列が偶然UTF-8として読める場合があるため)。
+    名前は PdfiumPage が渡す、UTF-8で読めたstrか、読めなかったbytes。
+    UTF-8で読めた名前も判定に含める(Shift_JISのバイト列が偶然UTF-8として読める場合があるため)。
     """
     result: dict[Any, str] = {}
     undecided: dict[Any, bytes] = {}
     for name in dict.fromkeys(n for n in names if n is not None):
-        raw = _raw_font_name(name)
+        raw = name
         if isinstance(raw, str):
             if raw.isascii():
                 result[name] = raw
@@ -422,11 +342,10 @@ def decode_font_names(names: list[Any]) -> dict[Any, str]:
     return result
 
 
-def extract_page_texts(page: pdfplumber.page.Page, pdf_data: bytes, page_no: int) -> list[TextRecord]:
+def extract_page_texts(page: PdfiumPage) -> list[TextRecord]:
     """文字を単語単位にまとめる。フォント・サイズ・色が変わる箇所では別単語に分ける。"""
-    metric("chars", len(page.chars))
-    with stage("texts.cid"):
-        chars = _restore_cid_chars(page.chars, pdf_data, page_no, page.height)
+    with stage("texts.unreadable"):
+        chars = _mark_unreadable(page.chars)
     with stage("texts.words"):
         words = extract_words(
             chars, extra_attrs=["fontname", "size", "non_stroking_color"], return_chars=True

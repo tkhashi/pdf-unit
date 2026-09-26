@@ -1,7 +1,6 @@
 """PDFに埋め込まれたラスター画像を抽出し、ページ上の配置と画像データを返す。
 
-pdfplumberは画像の配置は取れるが画像データのデコード(フィルタ・マスク処理)を
-持たないため、PDFium(pypdfium2)で画像オブジェクトを走査・レンダリングする。
+PDFium(pypdfium2)で画像オブジェクトを走査し、画像データをデコード(フィルタ・マスク処理)する。
 """
 
 from __future__ import annotations
@@ -56,7 +55,8 @@ _ROTATE_TRANSPOSE = {
 
 
 class PageToDisplay:
-    """PDF座標 → pdfplumberと同じ表示座標(top原点、ページ回転・MediaBox原点を反映)への写像。"""
+    """PDF座標 → 表示座標(表示範囲=CropBoxとMediaBoxの交わりの左上原点、ページ回転を反映)への写像。
+    PdfiumPage の線・文字と同じ座標系(ADR 0038)。"""
 
     def __init__(self, page: pdfium.PdfPage) -> None:
         self._page = page
@@ -81,34 +81,43 @@ def _iter_images(page: pdfium.PdfPage, form=None, forms: list[pdfium.PdfMatrix] 
 
 
 def extract_page_images(pdf_data: bytes, page_no: int, png_indices: Container[int] | None = None) -> PageImages:
+    """PDF のバイト列から開いて extract_images を呼ぶ(計測スクリプト用。呼び出し側で PDFium のロックを取る)。"""
+    pdf = pdfium.PdfDocument(pdf_data)
+    try:
+        return extract_images(pdf[page_no], png_indices)
+    finally:
+        pdf.close()
+
+
+def extract_images(page: pdfium.PdfPage, png_indices: Container[int] | None = None) -> PageImages:
     """ページ内の埋め込み画像の配置情報と、png_indices で指定した画像番号の PNG を返す(None なら全画像)。
 
     画像データの取り出し(get_bitmap)は、PNG が不要な画像でも行う。取り出せない画像は飛ばして番号を
     詰めるため、取り出しを省くと画像番号が変わりうるから。PNG 化(時間の大半)だけを指定した画像に絞る(ADR 0026)。
+    取り出した bitmap は PDFium が確保したメモリで、文書を閉じても解放されない。ロックの外で後片付けが走らないよう、
+    PNG 化の後にここで閉じる(ADR 0038)。
     """
     records: list[ImageRecord] = []
     pngs: dict[int, bytes] = {}
-    pdf = pdfium.PdfDocument(pdf_data)
-    try:
-        page = pdf[page_no]
-        to_display = PageToDisplay(page)
-        rotation = page.get_rotation()
-        for obj, forms in _iter_images(page):
-            pdf_corners = [_to_page(p, forms) for p in obj.get_quad_points()]
-            # 四隅は左下・右下・右上・左上の順。PDF座標で上辺が水平かつ左辺が垂直なら回転・せん断なし
-            (x0, _), _, (_, y2), (x3, y3) = pdf_corners
-            axis_aligned = abs(y2 - y3) < 1e-3 and abs(x0 - x3) < 1e-3
-            corners = [to_display(p) for p in pdf_corners]
-            xs = [x for x, _ in corners]
-            ys = [y for _, y in corners]
-            try:
-                with stage("images.decode"):
-                    # 回転なし: render=Trueでアルファマスク・反転を適用した見た目を外接矩形に描く。
-                    # 回転あり: PDFiumのレンダリングは端が欠けるため、生の画素を返し
-                    # UI側で四隅に合わせたアフィン変換で描く(アルファマスクは未適用)。
-                    bitmap = obj.get_bitmap(render=axis_aligned)
-            except pdfium.PdfiumError:
-                continue
+    to_display = PageToDisplay(page)
+    rotation = page.get_rotation()
+    for obj, forms in _iter_images(page):
+        pdf_corners = [_to_page(p, forms) for p in obj.get_quad_points()]
+        # 四隅は左下・右下・右上・左上の順。PDF座標で上辺が水平かつ左辺が垂直なら回転・せん断なし
+        (x0, _), _, (_, y2), (x3, y3) = pdf_corners
+        axis_aligned = abs(y2 - y3) < 1e-3 and abs(x0 - x3) < 1e-3
+        corners = [to_display(p) for p in pdf_corners]
+        xs = [x for x, _ in corners]
+        ys = [y for _, y in corners]
+        try:
+            with stage("images.decode"):
+                # 回転なし: render=Trueでアルファマスク・反転を適用した見た目を外接矩形に描く。
+                # 回転あり: PDFiumのレンダリングは端が欠けるため、生の画素を返し
+                # UI側で四隅に合わせたアフィン変換で描く(アルファマスクは未適用)。
+                bitmap = obj.get_bitmap(render=axis_aligned)
+        except pdfium.PdfiumError:
+            continue
+        try:
             index = len(records)
             if png_indices is None or index in png_indices:
                 with stage("images.png"):
@@ -120,22 +129,23 @@ def extract_page_images(pdf_data: bytes, page_no: int, png_indices: Container[in
                     pil.save(buf, format="PNG")
                 pngs[index] = buf.getvalue()
                 add_metric("images_png_px", pil.width * pil.height)
-            px_w, px_h = obj.get_px_size()
-            # 画像の横辺(左下→右下)の長さ。回転していても実寸になる
-            width_pt = ((xs[1] - xs[0]) ** 2 + (ys[1] - ys[0]) ** 2) ** 0.5
-            records.append(
-                {
-                    "type": "image",
-                    "index": index,
-                    "bbox": (min(xs), min(ys), max(xs), max(ys)),
-                    "quad": [round(v, 2) for x, y in zip(xs, ys) for v in (x, y)],
-                    "placement": "bbox" if axis_aligned else "affine",
-                    "px_width": px_w,
-                    "px_height": px_h,
-                    "dpi": round(px_w / width_pt * 72, 1) if width_pt > 0 else 0.0,
-                    "filters": list(obj.get_filters()),
-                }
-            )
-    finally:
-        pdf.close()
+                del pil  # bitmap のメモリを共有しているので、閉じる前に手放す
+        finally:
+            bitmap.close()
+        px_w, px_h = obj.get_px_size()
+        # 画像の横辺(左下→右下)の長さ。回転していても実寸になる
+        width_pt = ((xs[1] - xs[0]) ** 2 + (ys[1] - ys[0]) ** 2) ** 0.5
+        records.append(
+            {
+                "type": "image",
+                "index": index,
+                "bbox": (min(xs), min(ys), max(xs), max(ys)),
+                "quad": [round(v, 2) for x, y in zip(xs, ys) for v in (x, y)],
+                "placement": "bbox" if axis_aligned else "affine",
+                "px_width": px_w,
+                "px_height": px_h,
+                "dpi": round(px_w / width_pt * 72, 1) if width_pt > 0 else 0.0,
+                "filters": list(obj.get_filters()),
+            }
+        )
     return PageImages(records, pngs)
