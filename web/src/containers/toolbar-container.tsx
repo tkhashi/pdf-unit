@@ -29,6 +29,12 @@ export const ToolbarContainer = () => {
   return (
     <header className="flex flex-none flex-wrap items-center gap-x-2.5 gap-y-1.5 whitespace-nowrap bg-neutral px-3 py-1.5 text-[13px] text-neutral-content">
       <strong className="font-semibold tracking-wide">PDF Unit</strong>
+      <span
+        className="-ml-1.5 text-[10px] text-neutral-content/50"
+        data-tip="このアプリのバージョン"
+      >
+        v{__APP_VERSION__}
+      </span>
       <Separator />
       <FileOpenButton onOpen={actions.openFile} />
       {doc ? (

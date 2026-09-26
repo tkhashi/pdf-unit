@@ -9,7 +9,9 @@
 #   2. 1ページのPDFを x-amz-content-sha256 付きで POST /api/page/lines すると 200 で、線が検出される(Lambda)
 #   3. Accept-Encoding: gzip を付けた POST /api/page/image は gzip で圧縮して返る(CloudFront・Lambda Web Adapter を
 #      通しても圧縮が効いていること。線数の多いページの応答を Lambda の上限6MB に収めるために必要。ADR 0024)
-#   4. x-amz-content-sha256 が無い POST は 403(CloudFront OAC。--local では省略)
+#   4. Content-Encoding: gzip で圧縮した PDF を POST /api/page/lines すると、圧縮なしと同じ結果が返る(CloudFront・
+#      Lambda Web Adapter を通してもリクエストの圧縮が届くこと。4MB を超えるページを送るために必要。ADR 0034)
+#   5. x-amz-content-sha256 が無い POST は 403(CloudFront OAC。--local では省略)
 set -euo pipefail
 
 LOCAL=0
@@ -76,6 +78,17 @@ assert d["page"] == {"width": 200, "height": 200}, d["page"]
 assert len(d["lines"]) == 1, len(d["lines"])
 PY
 echo "OK: POST /api/page/lines -> 200 (線1本を検出)"
+cp "$WORK/body" "$WORK/lines.json"
+
+# gzip で圧縮して送る。OAC の x-amz-content-sha256 は、送る(圧縮後の)ボディで計算する
+python3 -c 'import gzip,sys; open(sys.argv[2],"wb").write(gzip.compress(open(sys.argv[1],"rb").read()))' \
+  "$WORK/page.pdf" "$WORK/page.pdf.gz"
+GZ_SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WORK/page.pdf.gz")"
+code="$(status -X POST "$BASE/api/page/lines" -H 'Content-Type: application/pdf' -H 'Content-Encoding: gzip' \
+  -H "x-amz-content-sha256: $GZ_SHA" --data-binary @"$WORK/page.pdf.gz")" || code=000
+[[ "$code" == 200 ]] || fail "gzip で圧縮した POST /api/page/lines -> $code: $(head -c 300 "$WORK/body")"
+cmp -s "$WORK/body" "$WORK/lines.json" || fail "gzip で圧縮した POST /api/page/lines の応答が圧縮なしと違う"
+echo "OK: POST /api/page/lines (gzip で圧縮したリクエスト) -> 200、圧縮なしと同じ応答"
 
 # 圧縮はボディが一定の大きさ以上の場合だけ行われるので、PNG の base64 を含む原本画像の応答で確かめる
 encoding="$(curl -sS -o "$WORK/image.gz" -D - -X POST "$BASE/api/page/image?resolution=72" \

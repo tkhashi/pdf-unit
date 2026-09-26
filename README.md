@@ -29,7 +29,24 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 - `main`: 本番。`main` への反映はそのまま AWS へのデプロイになる(「デプロイ」参照)ため、手動で行うか、エージェントには明示的に指示したときのみ行わせます
 - 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)
 
-作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。
+作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。`development` 向けの PR には種別に応じたラベル(`feat` → `enhancement`、`fix` → `bug`、`docs` → `documentation`)を付けます(自動生成のリリースノートの分類に使います)。
+
+### バージョン
+
+版は `vX.Y.Z` 形式で、正は Git のタグです(ADR 0033)。`pyproject.toml`・`web/package.json` の `version` は使いません。
+
+- `main` へのマージ(本番デプロイ)のたびに2桁目を上げます
+- 機能の追加・変更がなく、バグ修正や UI のレイアウト調整のような軽微な変更だけのリリースでは、3桁目を上げます
+- 1桁目は、よほど大きな変更があるときだけ上げます(判断はリポジトリの管理者が行います)
+
+上げる桁は、リリース PR(`development` → `main`)のラベルで指定します。ラベルなしなら2桁目、`semver:patch` なら3桁目、`semver:major` なら1桁目です。リリース PR には、リリースノートの一覧から除くための `release` ラベルも付けます。
+
+```sh
+gh pr create --base main --head development --label release                       # 2桁目を上げる
+gh pr create --base main --head development --label release --label semver:patch  # 3桁目を上げる
+```
+
+デプロイが成功すると、ワークフローがタグ `vX.Y.Z` と GitHub のリリースを作ります。リリースノートは GitHub の自動生成で、`.github/release.yml` の設定に従って PR のラベルごとに分類されます。画面のツールバーには、アプリ名の横に版が表示されます。手元のビルドでは `git describe --tags --always --dirty` の値になります。タグは `main` のマージコミットに付き、`development` 系のブランチからは辿れないため、通常はコミットのハッシュ(例: `va202736-dirty`)が表示されます。
 
 ### UI の開発
 
@@ -62,11 +79,13 @@ pnpm --dir web fix      # 整形と自動修正(ultracite fix)
 
 `main` にマージすると、GitHub Actions(`.github/workflows/deploy.yml`)が AWS へ自動で反映します(ADR 0021)。
 
-1. pnpm と Node.js を用意し、`scripts/build_lambda.sh` で UI をビルドして(`src/pdf_unit/static`)、Lambda 用の zip(`dist/lambda.zip`)を組み立てる
-2. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
-3. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
-4. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
-5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・画面が参照する `assets/`・API・応答の gzip 圧縮・OAC)
+1. `scripts/next_version.sh` で版を決める(最新のタグと、リリース PR のラベルから。コミットにすでにタグがあればその版)
+2. pnpm と Node.js を用意し、`scripts/build_lambda.sh` で UI をビルドして(`src/pdf_unit/static`。版は環境変数 `APP_VERSION` で埋め込む)、Lambda 用の zip(`dist/lambda.zip`)を組み立てる
+3. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
+4. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
+5. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
+6. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・画面が参照する `assets/`・API・リクエストと応答の gzip 圧縮・OAC)
+7. 新しい版なら、タグ `vX.Y.Z` と GitHub のリリース(自動生成のリリースノート)を作る。デプロイに失敗した場合は作らないので、再実行すれば同じ版になります
 
 AWS のリソース(S3・Lambda・CloudFront・このワークフローが引き受けるロール)は別リポジトリ `pdf-unit.infra` が定義し、そちらは手動でデプロイします。初回の準備(リポジトリ変数の登録など)は `pdf-unit.infra` の README「アプリのデプロイ」を参照してください。
 
@@ -93,7 +112,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 ## 画面構成
 
 - **ヘッダー(ツールバー)**: カテゴリごとに縦線で区切り、次の順に並びます。画面幅に収まらない場合は折り返します
-  - アプリ名 | 「開く」・開いているファイル名・「3 / 108 ページ」 | 表示切替(両方 / ベクター / ラスター のセグメントボタン) | 種類別の凡例(一括チェック、種類ごとの件数・表示切替) | 原本の濃さ | 線幅補正の係数 … `?`(操作説明、右端)
+  - アプリ名と版(例: `v0.2.0`、小さく表示) | 「開く」・開いているファイル名・「3 / 108 ページ」 | 表示切替(両方 / ベクター / ラスター のセグメントボタン) | 種類別の凡例(一括チェック、種類ごとの件数・表示切替) | 原本の濃さ | 線幅補正の係数 … `?`(操作説明、右端)
   - 各項目はマウスを乗せると約0.25秒で機能の補足を表示します。`?` はクリック(または Enter)で操作説明の表示を固定でき、もう一度クリックするか Esc で閉じます
   - ページの移動は左のサムネイル一覧から行います
 - **左: サムネイル一覧**: 各ページを元PDFのまま縮小表示します。クリックでページを切り替え、現在のページは青枠で強調されます。一覧の右(図面との境目)に隣接する細長いボタン(`◀`/`▶`)で開閉します(閉じてもボタンは残ります)
@@ -170,6 +189,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 | POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
 | POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
+| POST | `/api/page/images?start=&count=` | 埋め込み画像 `start` 番以降の画像データをまとめて返す(`count` は既定100・上限500)。base64 の合計が5.5MB に収まるところで区切る。`{images: [{index, png_base64}], total, next}`(`next` は続きの画像番号、無ければ `null`)。各画像は `/api/page/images/{k}` とバイト単位で同じ([ADR 0032](docs/adr/0032-embedded-images-batch-api.md)) |
 | GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
 | GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
 
@@ -177,6 +197,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 
 - ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIは切り出したPDFごとに計算し、1ページ分の切り出し結果は直近6ページ分を使い回します
 - 1回に送るPDF(切り出したページ)の上限は 4MB(4 × 1024 × 1024 バイト)です。PDF全体の大きさには上限がありません。UIは超過するページを送らずにエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
+- ボディは `Content-Encoding: gzip` で圧縮して送ることもできます(ADR 0034)。上限の 4MB は送る(圧縮後の)大きさにかかり、展開後は 64MB まで受け付けます(超えると 413、壊れた gzip は 400、gzip 以外の圧縮形式は 415)。`x-amz-content-sha256` は圧縮後のボディで計算します。応答は圧縮なしで送った場合と同じです。UI はまだ圧縮して送っていません(Issue #8)
 - 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
 - `Accept-Encoding: gzip` を付けたリクエストには、応答を gzip(圧縮レベル4)で圧縮して返します(ブラウザは自動で付け、自動で展開します)。線数の多いページの抽出結果は JSON で6MBを超えることがありますが、圧縮すると1/6前後になり Lambda の上限に収まります(ADR 0024)。CloudFront を通しても圧縮が効いていることは `scripts/smoke_test.sh` で確かめます
 - ページ・画像番号が範囲外の場合は 404 を返します
@@ -189,7 +210,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 - **`Server-Timing` / `X-Perf-Metrics` ヘッダー**: 区間の所要時間(ミリ秒)と件数です。区間名の `.` は内訳を表し(`calib.render` は `calib` の内訳)、`.` を含まない区間の合計がその API の処理時間の目安になります。`lock_wait` は PDFium のロック待ちの時間です
   - `/api/page/lines`: `open`(PDFを開く)・`parse`(pdfminer によるページの解析)・`vectors`(線の抽出)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.cid`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)
   - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
-  - `/api/page/images/{k}`: `open`・`images`・`downscale`
+  - `/api/page/images/{k}`・`/api/page/images`: `open`・`images`・`downscale`
 - **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`(圧縮後の転送される大きさ)・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
 - **ブラウザのコンソール**: `console.debug`(DevTools の Console で Verbose を有効にすると表示)に、API 呼び出しごとの所要時間・送受信サイズ・`Server-Timing`、ページ切り出しの時間、ページ切替からの経過(線データ受信・描画準備完了・初回描画完了・原本画像表示)を出します
 - **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します。ブラウザと同じく `Accept-Encoding: gzip` を付けて送り、応答の大きさは展開後(`resp_bytes`)・転送される大きさ(`wire_bytes`)・Lambda の上限と比べる大きさの推定(`lambda_bytes`。圧縮した応答は Lambda Web Adapter が base64 化するため4/3倍)を記録します
@@ -228,7 +249,9 @@ scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
   profile_pages.py ページごとの API の性能計測
-.github/workflows/deploy.yml  main へのマージで AWS へ反映
+  next_version.sh  デプロイする版の決定(タグとリリース PR のラベルから)
+.github/workflows/deploy.yml  main へのマージで AWS へ反映し、版のタグとリリースを作る
+.github/release.yml  自動生成のリリースノートの分類
 .github/pull_request_template.md  PR 本文のテンプレート
 .claude/settings.json  Claude Code のフック設定(ブランチ運用の検査)
 .claude/hooks/guard-git.sh  git/gh 操作を検査するフック
@@ -244,7 +267,7 @@ docs/adr/          設計判断の記録
 - フォント名の文字コードは UTF-8(BOM付きを含む)・UTF-16・Shift_JIS(cp932)・ASCII のみ判定します。1ページ内に異なる文字コードのフォント名が混在する場合や、GBK・Big5 等で書かれている場合は、誤った文字や `#82` 形式の表記になることがあります(ADR 0021)
 - 部分埋め込みフォントで文字の対応情報(ToUnicode・フォント内の cmap)が削られている場合、何の文字かを復元できず「□」で表示されます(CID が元フォントのグリフ番号のため。元フォントがあれば復元できる見込みがあります: ADR 0018)
 - 線数の多い大判図面では、ページの読み込みに数秒かかることがあります(A1 判・線約4.7万本のページで、手元の計測で約5秒。大半は pdfminer によるページの解析です)。キャッシュを持たないため、同じページを開き直すたびに抽出します
-- 1ページだけで 4MB を超えるページ(大きな埋め込み画像を含むページなど)は処理できません(Lambda のリクエスト上限による)。PDF全体の大きさは問いません
+- 1ページだけで 4MB を超えるページ(大きな埋め込み画像や、小さな画像を大量に含むページなど)は処理できません(Lambda のリクエスト上限による)。PDF全体の大きさは問いません。サーバーは gzip で圧縮したリクエストを受け付けるので、UI が圧縮して送るようになれば、圧縮後に 4MB に収まるページは処理できるようになります(Issue #8)
 - 暗号化されたPDFは開けません(pdf-lib が読み込めないため)。エラーは「暗号化されたPDFは開けません」ではなく「PDFを読み込めません(…encrypted…)」と表示されます(pdf-lib のエラーの種類を判定できないため。ADR 0031)
 - 最初に文書を開くとき、ステータス欄は文書を開くまで表示されないため、「読み込み中...」や読み込みエラーは画面に出ません(2つ目以降の文書では表示されます)
 - 同じファイルを続けて「開く」から選び直しても反応しません。図面表示領域の外へPDFをドロップすると、ブラウザがそのPDFを開きます
