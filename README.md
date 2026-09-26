@@ -129,7 +129,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 | rect | 緑 | 軸に平行な閉じた四角形のパス |
 | curve | 紫 | それ以外のパス(ベジェ曲線を保持) |
 | text | 橙 | 文字を単語単位にまとめたもの |
-| image | 元画像のまま | PDFium で抽出した埋め込みラスター画像 |
+| image | 灰色の枠(中は原本画像を不透明で表示) | PDF に埋め込まれたラスター画像の配置範囲 |
 
 ヘッダーの表示切替(セグメントボタン)で、両方 / ベクター(線・文字のみ) / ラスター(埋め込み画像のみ) のどれか1つを選べます。凡例のチェックボックスで種類ごとの表示/非表示も切り替えられ、凡例先頭の一括チェックで5種類をまとめて切り替えられます(全部表示中はチェック、一部だけ表示中は「−」、全部非表示は空。押すと、全部表示中なら全部非表示、それ以外なら全部表示)。非表示の要素はホバー・クリックの対象外です。
 
@@ -177,9 +177,8 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
   3. それ以外の名前は、ページ内のすべてを UTF-8 → BOM無し UTF-16(0x00 を含む偶数長の名前ばかりの場合)→ Shift_JIS(cp932)の順に試し、すべてを読める最初の文字コードを使う。制御文字・私用領域の文字が出る場合は読めなかったとみなす
   4. どれでも読めない場合は推測せず、PDF の名前表記(`#82l#82r…`)で表示する
 - **埋め込み画像**:
-  - Form XObject 内の画像も含めて抽出します
-  - 回転なしで置かれた画像は透過マスク適用済みの見た目を、回転・せん断された画像は生の画素を四隅に合わせて変形して描画します
-  - `/api/page/lines` は配置情報だけを返し、画像データ(PNG)は `/api/page/images/{k}` が要求された1枚だけを PNG 化して返します([ADR 0026](docs/adr/0026-embedded-image-png-on-demand.md))
+  - Form XObject 内の画像も含めて抽出します。PDF 内で1枚の絵が複数の画像(帯状など)に分けて保存されている場合は、分かれたまま1つずつ扱います
+  - 画像データは取得せず、`/api/page/lines` が返す配置範囲(四隅)に枠を描きます。枠の中は、原本画像の濃さの設定によらず原本画像を不透明で表示するので、絵柄はそのまま見えます([ADR 0039](docs/adr/0039-embedded-images-as-outlines.md))
 - **サムネイル**: 線検出を行わず、PDFium で元PDFを出力幅160px前後に縮小描画したものです。一覧の表示範囲に入ったページを含む10ページ単位のバッチで、1バッチずつ、本体ページの読み込みが終わってから取得します(同じバッチは重複して要求しません)。バッチを切り出したPDFが送信上限を超える場合は半分ずつに分けて送り、1ページでも超える場合はそのサムネイルを斜線の「表示できません」表示にします
 
 ## API
@@ -190,8 +189,8 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 | POST | `/api/thumbs?width=` | サムネイル。ボディのPDFの全ページ(最大10)、幅60〜400px。`{thumbs: [{page, png_base64}]}`(`page` は送ったPDF内でのページ番号) |
 | POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
-| POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
-| POST | `/api/page/images?start=&count=` | 埋め込み画像 `start` 番以降の画像データをまとめて返す(`count` は既定100・上限500)。base64 の合計が5.5MB に収まるところで区切る。`{images: [{index, png_base64}], total, next}`(`next` は続きの画像番号、無ければ `null`)。各画像は `/api/page/images/{k}` とバイト単位で同じ([ADR 0032](docs/adr/0032-embedded-images-batch-api.md)) |
+| POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}`(UI は使っていません。ADR 0039) |
+| POST | `/api/page/images?start=&count=` | 埋め込み画像 `start` 番以降の画像データをまとめて返す(`count` は既定100・上限500)。base64 の合計が5.5MB に収まるところで区切る。`{images: [{index, png_base64}], total, next}`(`next` は続きの画像番号、無ければ `null`)。各画像は `/api/page/images/{k}` とバイト単位で同じ([ADR 0032](docs/adr/0032-embedded-images-batch-api.md))。UI は使っていません |
 | GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
 | GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
 
@@ -203,6 +202,7 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 - 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
 - `Accept-Encoding: gzip` を付けたリクエストには、応答を gzip(圧縮レベル4)で圧縮して返します(ブラウザは自動で付け、自動で展開します)。線数の多いページの抽出結果は JSON で6MBを超えることがありますが、圧縮すると1/6前後になり Lambda の上限に収まります(ADR 0024)。CloudFront を通しても圧縮が効いていることは `scripts/smoke_test.sh` で確かめます
 - PDFium で開けないPDF(途中で切れている、ページツリーが壊れている等)は 400、ページ・画像番号が範囲外の場合は 404 を返します
+- ページや文書を切り替えると、UI は前のページの線データ・原本画像の要求を取り消します(`AbortController`。ADR 0039)
 - `/api/*` の応答には、処理区間ごとの所要時間を示す `Server-Timing` ヘッダーと、件数などを JSON で示す `X-Perf-Metrics` ヘッダーが付きます(「性能の計測」参照)
 
 ## 性能の計測
@@ -277,8 +277,6 @@ docs/adr/          設計判断の記録
 
 ## 既知の制約
 
-- 回転・せん断された埋め込み画像は透過マスク(SMask)が適用されません
-- 入れ子の Form XObject 自体が回転している場合、画像の位置は正しいものの絵柄はフォームの回転を反映しません
 - 再描画の文字は sans-serif で描くため、元のフォントとは字形・字幅が異なります
 - フォント名の文字コードは UTF-8(BOM付きを含む)・UTF-16・Shift_JIS(cp932)・ASCII のみ判定します。1ページ内に異なる文字コードのフォント名が混在する場合や、GBK・Big5 等で書かれている場合は、誤った文字や `#82` 形式の表記になることがあります(ADR 0021)
 - 部分埋め込みフォントで文字の対応情報(ToUnicode・フォント内の cmap)が削られている場合、何の文字かを復元できず「□」で表示されます(CID が元フォントのグリフ番号のため。元フォントがあれば復元できる見込みがあります: ADR 0018)

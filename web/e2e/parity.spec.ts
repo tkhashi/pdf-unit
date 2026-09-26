@@ -6,6 +6,7 @@ import {
   canvasData,
   equalizeViewports,
   frames,
+  imageMasks,
   infoRows,
   type OpenOptions,
   openFile,
@@ -58,12 +59,14 @@ const same = async <T>(p: Pair, f: (ui: Ui) => Promise<T>, what: string) => {
   return a;
 };
 
+// 埋め込み画像の描き方は新旧で異なる(新UIは枠と原本画像。ADR 0039)ので、画像の範囲は比べない
 const sameCanvases = async (p: Pair, what: string) => {
+  const masks = await imageMasks(p.newUi);
   for (const key of ["scene", "highlight"] as const) {
     const a = await canvasData(p.oldUi, key);
     const b = await canvasData(p.newUi, key);
     if (a !== b) {
-      const n = await pixelDiff(p.newUi, a, b);
+      const n = await pixelDiff(p.newUi, a, b, masks);
       expect(n, `${what}: ${key} の画素の差`).toBe(0);
     }
   }
@@ -121,8 +124,13 @@ test("文書を開いた直後の表示・通信・計測ログが一致する",
   await same(p, state, "状態");
   await same(
     p,
-    async (ui) => ui.apiCalls.map((c) => `${c.path} ${c.sha256}`).sort(),
-    "API 呼び出し(パスと送ったPDFのSHA-256)"
+    async (ui) =>
+      ui.apiCalls
+        // 新UIは埋め込み画像の画像データを要求しない(ADR 0039)
+        .filter((c) => !c.path.startsWith("/api/page/images"))
+        .map((c) => `${c.path} ${c.sha256}`)
+        .sort(),
+    "API 呼び出し(パスと送ったPDFのSHA-256。埋め込み画像の画像データを除く)"
   );
   await same(
     p,
