@@ -10,12 +10,16 @@ PDF(主に建築図面)を開くと、pdfplumber / PDFium で検出した線・�
 
 ```sh
 uv sync
+pnpm --dir web install   # UI の依存(初回と依存の変更時)
+pnpm --dir web build     # UI をビルドして src/pdf_unit/static に出力
 uv run pdf-unit
 ```
 
-ブラウザで http://127.0.0.1:8000 を開き、PDFをドラッグ&ドロップするか「開く」から選択します。`uv run pdf-unit` はサーバーを `127.0.0.1` のみで待ち受けます。
+ブラウザで http://127.0.0.1:8000 を開き、PDFをドラッグ&ドロップするか「開く」から選択します。`uv run pdf-unit` はサーバーを `127.0.0.1` のみで待ち受けます。UI をビルドしていない場合、`GET /` はビルド手順を示す 503 を返します(API は動きます)。
 
-AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Adapter + `uvicorn pdf_unit.server:app` として実行します。静的ファイル(`index.html`・`vendor/`)は S3 から配信します。
+必要なもの: Python 3.13 以上と uv、Node.js 24 以上と pnpm(版は `web/package.json` の `packageManager`)。
+
+AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Adapter + `uvicorn pdf_unit.server:app` として実行します。静的ファイル(`index.html`・`assets/`・`licenses.md`)は S3 から配信します。
 
 ## 開発の進め方
 
@@ -26,6 +30,23 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 - 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)
 
 作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。
+
+### UI の開発
+
+UI は `web/` 配下の React + TypeScript です(ADR 0027〜0031)。パッケージ管理は pnpm、バンドルは Vite、lint / format は Biome(ultracite のプリセット)、スタイルは Tailwind CSS + daisyUI です。
+
+```sh
+.venv/bin/uvicorn pdf_unit.server:app --port 8765   # API サーバー(開発サーバーの中継先。PDF_UNIT_API で変更可)
+pnpm --dir web dev      # Vite の開発サーバー(/api を 127.0.0.1:8765 へ中継)
+pnpm --dir web check    # 型検査(tsc)・lint(ultracite check)・単体テスト(Vitest)
+pnpm --dir web fix      # 整形と自動修正(ultracite fix)
+```
+
+- 依存は `pnpm-workspace.yaml` の `minimumReleaseAge` により、公開から7日未満の版を入れません。依存を足すときは `--save-exact` で版を固定します
+- 構成: `domain/`(純粋関数のロジック)・`state/`(Zustand の store と reducer)・`controllers/`(非同期処理と入力)・`render/`(Canvas の描画)・`services/`(API・pdf-lib)・`containers/`(store の購読)・`components/`(props だけの表示部品)。依存の向きと各層の役割は ADR 0028 を参照してください
+- E2E(Playwright。事前に `pnpm --dir web e2e:build` と、上の API サーバーの起動が必要。初回は `pnpm --dir web exec playwright install chromium`):
+  - `pnpm --dir web e2e` … 新UIの基本動作
+  - `pnpm --dir web e2e:parity` … 旧UI(`BASE_REF`、既定 `7acb834`)との並走比較(ADR 0031)
 
 ルールと、それを守らせる仕組みの置き場所は次のとおりです。
 
@@ -41,11 +62,11 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 
 `main` にマージすると、GitHub Actions(`.github/workflows/deploy.yml`)が AWS へ自動で反映します(ADR 0021)。
 
-1. `scripts/build_lambda.sh` で Lambda 用の zip(`dist/lambda.zip`)を組み立てる
+1. pnpm と Node.js を用意し、`scripts/build_lambda.sh` で UI をビルドして(`src/pdf_unit/static`)、Lambda 用の zip(`dist/lambda.zip`)を組み立てる
 2. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
 3. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
 4. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
-5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・同梱ライブラリ・API・応答の gzip 圧縮・OAC)
+5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・画面が参照する `assets/`・API・応答の gzip 圧縮・OAC)
 
 AWS のリソース(S3・Lambda・CloudFront・このワークフローが引き受けるロール)は別リポジトリ `pdf-unit.infra` が定義し、そちらは手動でデプロイします。初回の準備(リポジトリ変数の登録など)は `pdf-unit.infra` の README「アプリのデプロイ」を参照してください。
 
@@ -65,7 +86,7 @@ zip の中身と infra の Lambda 定義は次の点で一致している必要�
 手元での確認:
 
 ```sh
-scripts/build_lambda.sh                            # dist/lambda.zip を作る
+scripts/build_lambda.sh                            # UI をビルドし、dist/lambda.zip を作る
 scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動したサーバーに対して確認
 ```
 
@@ -144,12 +165,13 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
-| GET | `/` | UI(`static/index.html`) |
+| GET | `/` | UI(ビルドした `static/index.html`。未ビルドなら 503) |
 | POST | `/api/thumbs?width=` | サムネイル。ボディのPDFの全ページ(最大10)、幅60〜400px。`{thumbs: [{page, png_base64}]}`(`page` は送ったPDF内でのページ番号) |
 | POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
 | POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}` |
-| GET | `/vendor/pdf-lib.min.js` | UIが使う同梱ライブラリ(`static/vendor/` を配信。`index.html` からは相対パス `vendor/` で参照) |
+| GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
+| GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
 
 サーバーはステートレスで、PDFを保存せず、キャッシュも持ちません。`GET` 以外のAPIはすべて POST で、リクエストボディにPDFの生バイト列(`Content-Type: application/pdf`)を送ります。UIは開いたPDFをブラウザ上に保持し、[pdf-lib](https://github.com/Hopding/pdf-lib) で**必要なページだけを切り出したPDF**(`/api/page/*` は1ページ、`/api/thumbs` は最大10ページ)を送ります。`/api/page/*` のサーバーは送られたPDFの先頭ページを処理します(ADR 0019, 0020)。ページの寸法(一覧の枠・図面の枠)は UI が pdf-lib で求め、`/api/page/lines` の `page` で答え合わせします。
 
@@ -179,7 +201,7 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 ```
 
 - 1回の API 呼び出しごとに子プロセスを起動し、ASGI アプリに直接 POST します(Depends・JSON 直列化・ミドルウェアを含む実際の経路)。子プロセスの最大メモリを、その呼び出しのピークメモリとみなします
-- ページの切り出しは UI と同じく同梱の pdf-lib を Node.js で動かして行います。Node.js が無い場合は pypdfium2 で切り出しますが、UI が送るバイト列とは異なるため、計測値の比較には注意してください
+- ページの切り出しは UI と同じ pdf-lib(`web/node_modules/pdf-lib`。`pnpm --dir web install` で入ります)を Node.js で動かして行います。Node.js か pdf-lib が無い場合は pypdfium2 で切り出しますが、UI が送るバイト列とは異なるため、計測値の比較には注意してください
 - 計測する API は `--endpoints`(既定 `lines,image,images,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)、1ページで計測する埋め込み画像の数は `--max-images`(既定3、0で全件)で指定します
 - 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
@@ -192,8 +214,16 @@ src/pdf_unit/
   raster.py        埋め込み画像の抽出(PDFium)、座標変換
   calibration.py   線幅補正(ClassifierArchDrawingByJev から移植)
   timing.py        性能計測(処理区間の所要時間・件数の収集)
-  static/index.html  UI(HTML/CSS/JS 1ファイル、ビルド不要)
-  static/vendor/     同梱ライブラリ(pdf-lib 1.17.1、MIT)
+  static/          UI のビルド成果物(pnpm --dir web build が出力。リポジトリには含めない)
+web/               UI(React + TypeScript、pnpm・Vite・Biome/ultracite・Tailwind CSS・daisyUI)
+  src/domain/      純粋関数のロジック(ヒット判定・形状比較・選択・属性パネル・表示変換・文言)
+  src/state/       状態(Zustand の store と純粋関数の reducer)
+  src/controllers/ 非同期処理と入力(文書・ページ・原本画像・サムネイル・表示領域の操作・ツールチップ)
+  src/render/      Canvas の描画(store を購読して1フレームに1回描く)
+  src/services/    API 呼び出し・pdf-lib(ページの切り出し)・計測ログ・表示設定の保存
+  src/containers/  store を購読して components へ props を渡す
+  src/components/  props だけを受け取る表示部品
+  e2e/             Playwright(合成PDFの生成、新UIの基本動作、旧UIとの並走比較)
 scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
@@ -215,5 +245,7 @@ docs/adr/          設計判断の記録
 - 部分埋め込みフォントで文字の対応情報(ToUnicode・フォント内の cmap)が削られている場合、何の文字かを復元できず「□」で表示されます(CID が元フォントのグリフ番号のため。元フォントがあれば復元できる見込みがあります: ADR 0018)
 - 線数の多い大判図面では、ページの読み込みに数秒かかることがあります(A1 判・線約4.7万本のページで、手元の計測で約5秒。大半は pdfminer によるページの解析です)。キャッシュを持たないため、同じページを開き直すたびに抽出します
 - 1ページだけで 4MB を超えるページ(大きな埋め込み画像を含むページなど)は処理できません(Lambda のリクエスト上限による)。PDF全体の大きさは問いません
-- 暗号化されたPDFは開けません(pdf-lib が読み込めないため)
+- 暗号化されたPDFは開けません(pdf-lib が読み込めないため)。エラーは「暗号化されたPDFは開けません」ではなく「PDFを読み込めません(…encrypted…)」と表示されます(pdf-lib のエラーの種類を判定できないため。ADR 0031)
+- 最初に文書を開くとき、ステータス欄は文書を開くまで表示されないため、「読み込み中...」や読み込みエラーは画面に出ません(2つ目以降の文書では表示されます)
+- 同じファイルを続けて「開く」から選び直しても反応しません。図面表示領域の外へPDFをドロップすると、ブラウザがそのPDFを開きます
 - 原本画像は、応答サイズの上限により要求より低い解像度になる場合があります(拡大時に粗く見えることがあります)

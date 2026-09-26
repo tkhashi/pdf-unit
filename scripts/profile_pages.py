@@ -3,8 +3,8 @@
     uv run python scripts/profile_pages.py <PDF> [--pages 1-5,10] [--endpoints lines,image,images,thumbs]
         [--resolutions 100,200,400] [--out result.jsonl] [--dump DIR] [--cprofile DIR]
 
-- ページの切り出しは UI と同じく同梱の pdf-lib(Node.js)で行う(copyPages、useObjectStreams: false)。
-  Node.js が無い場合は pypdfium2 で切り出す(バイト列が UI と異なるため、計測値の比較には注意)。
+- ページの切り出しは UI と同じく pdf-lib(web/ の依存。Node.js)で行う(copyPages、useObjectStreams: false)。
+  Node.js か pdf-lib(pnpm --dir web install)が無い場合は pypdfium2 で切り出す(バイト列が UI と異なるため、計測値の比較には注意)。
 - 1回のAPI呼び出しごとに子プロセスを起動し、ASGI アプリを直接呼ぶ(Depends・JSON 直列化・ミドルウェアを含む
   実際の処理経路)。子プロセスの ru_maxrss を、その呼び出しのピークメモリとみなす。
 - ブラウザと同じく Accept-Encoding: gzip を付けて送る。resp_bytes は展開後、wire_bytes は転送される大きさ、
@@ -35,8 +35,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PDF_LIB = ROOT / "src" / "pdf_unit" / "static" / "vendor" / "pdf-lib.min.js"
-# UI と同じ値(index.html の RESOLUTIONS・THUMB_BATCH・サムネイル幅(140px × devicePixelRatio 2))
+# UI と同じ pdf-lib(web/ の依存。pnpm --dir web install で入る)
+PDF_LIB = ROOT / "web" / "node_modules" / "pdf-lib" / "dist" / "pdf-lib.min.js"
+# UI と同じ値(web/src/domain/constants.ts の RESOLUTIONS・THUMB_BATCH・サムネイル幅(140px × devicePixelRatio 2))
 DEFAULT_RESOLUTIONS = "100,200,400"
 THUMB_BATCH = 10
 THUMB_WIDTH = 280
@@ -184,7 +185,7 @@ def _parse_pages(spec: str | None, count: int) -> list[int]:
 def _split(pdf: Path, jobs: list[dict], splitter: str) -> str:
     """jobs の各 {out, indices} について、指定ページだけのPDFを書き出す。使った方式を返す。"""
     if splitter == "auto":
-        splitter = "pdflib" if shutil.which("node") else "pdfium"
+        splitter = "pdflib" if shutil.which("node") and PDF_LIB.is_file() else "pdfium"
     if splitter == "pdflib":
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump(jobs, f)

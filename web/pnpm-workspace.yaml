@@ -1,0 +1,2 @@
+# 公開から7日未満の版は入れない(Python 側の uv の exclude-newer = "7 days" と揃える)
+minimumReleaseAge: 10080

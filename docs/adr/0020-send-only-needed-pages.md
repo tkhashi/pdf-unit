@@ -1,6 +1,6 @@
 # ADR 0020: PDF全体ではなく、必要なページだけを切り出して送る
 
-- ステータス: 採用([0019](0019-aws-deployment.md) のPDF全体の送信と、PDF全体の4MB上限を置き換え)
+- ステータス: 採用([0019](0019-aws-deployment.md) のPDF全体の送信と、PDF全体の4MB上限を置き換え。pdf-lib を `static/vendor/` に同梱して `/vendor` で配信する方式は [0027](0027-frontend-react-typescript.md)・[0029](0029-build-artifacts-and-deploy.md) で npm の依存としてバンドルする方式に置き換え)
 - 日付: 2026-09-25
 
 ## コンテキスト

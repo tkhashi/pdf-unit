@@ -50,7 +50,18 @@ jobs:
       # setup-uv はメジャー版のタグ(v10)を公開していないため、完全な版で指定する
       - uses: astral-sh/setup-uv@v10.2.0
 
-      - name: Build Lambda zip
+      # UI(web/)のビルド用。pnpm の版は web/package.json の packageManager に従う(ADR 0029)
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # UI をビルドして src/pdf_unit/static に出力し、Lambda の zip も作る
+      - name: Build UI and Lambda zip
         run: scripts/build_lambda.sh
 
       - uses: aws-actions/configure-aws-credentials@v6

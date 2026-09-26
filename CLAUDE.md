@@ -29,3 +29,6 @@
 - 座標は pdfplumber の表示座標(左上原点、pt、ページ回転反映後)に統一する。PDFium から得た座標は `FPDF_PageToDevice` で変換する(ADR 0010)
 - Lambda の実行環境に関わる値(Python の版・アーキテクチャ・zip 直下の `run.sh`・待ち受けポート・`GET /` の起動確認)は `pdf-unit.infra` の Lambda 定義との約束事。`scripts/build_lambda.sh` でこれらを変える場合は、infra 側も合わせて変更する(README「infra との約束事」、ADR 0021)
 - 動作確認でサーバーを起動するときは、ユーザーが使っている `127.0.0.1:8000` と衝突しないよう別ポート(例: `.venv/bin/uvicorn pdf_unit.server:app --port 8765`)を使い、停止は自分が起動したプロセスの PID を指定して行う(`pkill -f` で名前一致させると、ユーザーのサーバーまで止めてしまう)
+- UI は `web/`(React + TypeScript、pnpm)。状態は `state/` の store と純粋関数の reducer だけで変え、`components/` は props だけを受け取り状態を持たない。API 呼び出しは `controllers/` から行い、`useEffect` からは呼ばない(ADR 0028)
+- `pnpm` は Aikido Safe Chain でラップされている。パッケージの導入が止められても迂回(`command pnpm`・`--safe-chain-skip-*` 等)せず、ユーザーに報告して別の版を検討する。依存は `--save-exact` で固定する(`minimumReleaseAge` で7日未満の版は入らない)
+- UI を変更したら `pnpm --dir web check`(型・ultracite・Vitest)を通し、操作・表示内容に関わる変更は `pnpm --dir web e2e` で確かめる。Vite の開発サーバーも `5173` 以外の衝突しないポートで起動し、PID を指定して止める

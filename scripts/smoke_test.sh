@@ -5,7 +5,7 @@
 #   scripts/smoke_test.sh --local http://127.0.0.1:8000    # ローカルのサーバー(OAC が無いので 403 の確認は省く)
 #
 # 確認内容:
-#   1. GET / と GET /vendor/pdf-lib.min.js が 200(S3 の静的ファイル)
+#   1. GET / と、index.html が参照する assets/ のスクリプト・スタイルが 200(S3 の静的ファイル)
 #   2. 1ページのPDFを x-amz-content-sha256 付きで POST /api/page/lines すると 200 で、線が検出される(Lambda)
 #   3. Accept-Encoding: gzip を付けた POST /api/page/image は gzip で圧縮して返る(CloudFront・Lambda Web Adapter を
 #      通しても圧縮が効いていること。線数の多いページの応答を Lambda の上限6MB に収めるために必要。ADR 0024)
@@ -48,11 +48,17 @@ SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb"
 
 status() { curl -sS -o "$WORK/body" -w '%{http_code}' "$@"; }
 
-for path in / /vendor/pdf-lib.min.js; do
-  code="$(status "$BASE$path")"
-  [[ "$code" == 200 ]] || fail "GET $path -> $code"
-  if [[ "$path" == / ]]; then grep -q "<title>PDF Unit</title>" "$WORK/body" || fail "GET / が PDF Unit の画面ではない"; fi
-  echo "OK: GET $path -> 200"
+code="$(status "$BASE/")"
+[[ "$code" == 200 ]] || fail "GET / -> $code"
+grep -q "<title>PDF Unit</title>" "$WORK/body" || fail "GET / が PDF Unit の画面ではない"
+echo "OK: GET / -> 200"
+# index.html が参照するビルド済みのスクリプト・スタイル(assets/ 以下、ファイル名にハッシュを含む)
+assets="$(grep -oE '(\./)?assets/[^"]+\.(js|css)' "$WORK/body" | sed 's#^\./##' | sort -u)"
+[[ -n "$assets" ]] || fail "GET / の index.html が assets/ を参照していない"
+for path in $assets; do
+  code="$(status "$BASE/$path")"
+  [[ "$code" == 200 ]] || fail "GET /$path -> $code"
+  echo "OK: GET /$path -> 200"
 done
 
 # 反映直後の一時的な失敗(コールドスタート等)に備えて数回試す

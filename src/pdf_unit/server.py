@@ -24,7 +24,7 @@ import pypdfium2 as pdfium
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -51,9 +51,10 @@ app = FastAPI(title="PDF Unit")
 # かかる割に縮まないため4にする(実測: 12.8MBの応答が level 4 で 2.14MB・87ms、level 9 で 1.95MB・760ms)。
 # 後で登録する計測ログのミドルウェアより内側になるので、ログの resp_bytes は圧縮後の大きさになる
 app.add_middleware(GZipMiddleware, compresslevel=4)
-# UIが使う同梱ライブラリ(static/vendor/pdf-lib.min.js 等)。index.html は相対パス vendor/ で参照するので、
-# 静的ファイルとして index.html と vendor/ を並べて配置すればそのまま動く
-app.mount("/vendor", StaticFiles(directory=_STATIC_DIR / "vendor"), name="vendor")
+# UI は web/ でビルドし static/ に出力する(index.html・assets/・licenses.md。ADR 0029)。index.html は
+# 相対パス assets/ で参照するので、静的ファイルとして並べて配置すればそのまま動く(AWS では S3 が配信する)。
+# ビルド前でもサーバー(API)は起動できるよう、ディレクトリの存在は起動時に確かめない
+app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets", check_dir=False), name="assets")
 
 # PDFium(pypdfium2)はスレッドセーフではなく、同時に呼ぶとプロセスごとクラッシュする(SIGSEGV)。
 # FastAPIの同期エンドポイントはスレッドプールで並行実行されるため、PDFiumを使う処理
@@ -251,9 +252,24 @@ def _downscale_png(png: bytes) -> str:
     return encoded
 
 
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(_STATIC_DIR / "index.html")
+@app.get("/", response_model=None)
+def index() -> FileResponse | PlainTextResponse:
+    page = _STATIC_DIR / "index.html"
+    if not page.is_file():
+        return PlainTextResponse(
+            "UI がビルドされていません。pnpm --dir web install && pnpm --dir web build を実行してください",
+            status_code=503,
+        )
+    return FileResponse(page)
+
+
+@app.get("/licenses.md")
+def licenses() -> FileResponse:
+    """UI に同梱したライブラリのライセンス(ビルド時に生成)。"""
+    path = _STATIC_DIR / "licenses.md"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not built")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8")
 
 
 # 以下のAPIのボディは、UIが対象ページだけを切り出したPDF。ページ番号は常に先頭(0)になる
