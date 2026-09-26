@@ -7,13 +7,26 @@ import { apiPost } from "../services/api";
 import { perfMark } from "../services/perf";
 import type { ControllerContext, DocumentSession } from "./context";
 
+// 表示中のページの原本画像の要求。ページ・文書を切り替えたら取り消す
+const imageRequests = new WeakMap<ControllerContext, Set<AbortController>>();
+
+const abortImageRequests = (ctx: ControllerContext): void => {
+  for (const abort of imageRequests.get(ctx) ?? []) {
+    abort.abort();
+  }
+  imageRequests.delete(ctx);
+};
+
 const syncImageSrc = (ctx: ControllerContext, src: string | null): void => {
   const img = ctx.dom.pageImage;
   if (!img) {
     return;
   }
+  // 埋め込み画像の範囲は原本画像を描き写すので、読み込み終わったら描き直す(ADR 0039)
+  img.onload = () => ctx.renderer.invalidate(true);
   if (src === null) {
     img.removeAttribute("src");
+    ctx.renderer.invalidate(true);
   } else {
     img.src = src;
   }
@@ -58,15 +71,24 @@ const requestImage = async (
   res: number
 ): Promise<void> => {
   const { app } = ctx;
+  const abort = new AbortController();
+  const requests = imageRequests.get(ctx) ?? new Set();
+  requests.add(abort);
+  imageRequests.set(ctx, requests);
   let r: PageImageResponse;
   try {
     r = await apiPost<PageImageResponse>(
       `/api/page/image?resolution=${res}`,
-      await session.pageBody(page)
+      await session.pageBody(page),
+      abort.signal
     );
   } catch {
-    app.dispatch({ docId, page, res, type: "originalImageFailed" });
+    if (!abort.signal.aborted) {
+      app.dispatch({ docId, page, res, type: "originalImageFailed" });
+    }
     return;
+  } finally {
+    requests.delete(abort);
   }
   const before = app.getState();
   app.dispatch({
@@ -85,6 +107,9 @@ const requestImage = async (
 /** 表示変換が変わるたびに解像度段階を確かめる。画像要素の src は store の値に合わせる */
 export const watchOriginalImage = (ctx: ControllerContext): (() => void) =>
   ctx.app.subscribe((s, p) => {
+    if (s.page.index !== p.page.index || s.doc?.id !== p.doc?.id) {
+      abortImageRequests(ctx);
+    }
     if (s.originalImage.src !== p.originalImage.src) {
       syncImageSrc(ctx, ctx.app.getState().originalImage.src);
     }

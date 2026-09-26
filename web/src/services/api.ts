@@ -25,7 +25,12 @@ const errorDetail = async (res: Response): Promise<string> => {
   }
 };
 
-export const apiPost = async <T>(path: string, body: PageBody): Promise<T> => {
+/** signal を中止すると通信を取り消す(ページを切り替えたときに、前のページの要求を取り消すため) */
+export const apiPost = async <T>(
+  path: string,
+  body: PageBody,
+  signal?: AbortSignal
+): Promise<T> => {
   if (body.bytes.length > MAX_SEND_BYTES) {
     // 送っても 413 になるので送信しない
     throw new ApiError(413, tooLargeMessage(body.bytes.length, MAX_SEND_BYTES));
@@ -38,6 +43,7 @@ export const apiPost = async <T>(path: string, body: PageBody): Promise<T> => {
       "x-amz-content-sha256": body.sha256,
     },
     method: "POST",
+    signal: signal ?? null,
   });
   if (!res.ok) {
     throw new ApiError(res.status, await errorDetail(res));

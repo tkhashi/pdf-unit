@@ -1,6 +1,7 @@
 // 描画に使うブラウザのオブジェクト(Path2D・画像)。ページのモデル・選択の同一性をキーに作り置きする
 // (モデル・選択は作成後に書き換えないため、同じオブジェクトなら同じ内容)
 import type { StrokeType } from "../domain/constants";
+import { at } from "../domain/geometry";
 import { type Item, isArea, isImage } from "../domain/items";
 import type { PageModel } from "../domain/page-model";
 import type { Selection } from "../domain/selection";
@@ -12,8 +13,8 @@ export interface StrokeBatch {
 }
 
 export interface PageResources {
-  /** 埋め込み画像の画像データ(ページ内の画像番号 → 画像) */
-  readonly images: ReadonlyMap<number, HTMLImageElement>;
+  /** 埋め込み画像の範囲(全画像の四隅を1つにまとめたもの。画像が無ければ null) */
+  readonly imageRegions: Path2D | null;
   /** 線の要素ごとの Path2D(文字・画像は undefined) */
   readonly paths: readonly (Path2D | undefined)[];
   /** ベクター描画用バッチ(種類×描画太さごとに1つのPath2D、最初に現れた順) */
@@ -50,15 +51,31 @@ const batchStrokes = (
 
 const pageResources = new WeakMap<PageModel, PageResources>();
 
+/** 画像の四隅(左下・右下・右上・左上)をつないだ閉じた範囲を path に足す */
+export const addQuad = (path: Path2D, quad: readonly number[]): void => {
+  path.moveTo(at(quad, 0), at(quad, 1));
+  for (let i = 2; i < 8; i += 2) {
+    path.lineTo(at(quad, i), at(quad, i + 1));
+  }
+  path.closePath();
+};
+
+/** 埋め込み画像の範囲を1つの Path2D にまとめる(画像が無ければ null) */
+export const imageRegionsOf = (items: Iterable<Item>): Path2D | null => {
+  let path: Path2D | null = null;
+  for (const it of items) {
+    if (isImage(it)) {
+      path ??= new Path2D();
+      addQuad(path, it.quad);
+    }
+  }
+  return path;
+};
+
 /**
- * ページの描画資源を作る。埋め込み画像は要素だけ作り、画像データは loadImage で取得する
- * (読み込み完了時に onImageLoad を呼ぶ)
+ * ページの描画資源を作る。埋め込み画像は画素を取得せず、範囲(枠)だけを描く(ADR 0039)
  */
-export const preparePageResources = (
-  model: PageModel,
-  loadImage: (index: number, el: HTMLImageElement) => void,
-  onImageLoad: () => void
-): PageResources => {
+export const preparePageResources = (model: PageModel): PageResources => {
   const existing = pageResources.get(model);
   if (existing) {
     return existing;
@@ -66,17 +83,8 @@ export const preparePageResources = (
   const paths = model.items.map((it) =>
     isArea(it) ? undefined : new Path2D(it.d)
   );
-  const images = new Map<number, HTMLImageElement>();
-  for (const it of model.items) {
-    if (isImage(it)) {
-      const el = new Image();
-      el.onload = onImageLoad;
-      loadImage(it.index, el);
-      images.set(it.index, el);
-    }
-  }
   const resources = {
-    images,
+    imageRegions: imageRegionsOf(model.items),
     paths,
     strokeBatches: batchStrokes(model.items, paths).strokes,
   };
@@ -85,7 +93,7 @@ export const preparePageResources = (
 };
 
 const EMPTY_RESOURCES: PageResources = {
-  images: new Map(),
+  imageRegions: null,
   paths: [],
   strokeBatches: [],
 };

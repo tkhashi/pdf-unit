@@ -9,23 +9,26 @@ import {
   TYPE_COLORS,
 } from "../domain/constants";
 import { at, insetQuad, quadMinSide } from "../domain/geometry";
-import {
-  type ImageItem,
-  type Item,
-  isImage,
-  isText,
-  type TextItem,
-} from "../domain/items";
+import { type Item, isImage, isText, type TextItem } from "../domain/items";
 import type { PageModel } from "../domain/page-model";
 import type { Selection } from "../domain/selection";
+import type { PageSize } from "../domain/types";
 import { highlightPad, type View } from "../domain/view";
-import type { PageResources, StrokeBatch } from "./resources";
+import {
+  imageRegionsOf,
+  type PageResources,
+  type StrokeBatch,
+} from "./resources";
 
 export interface SceneInput {
   readonly dpr: number;
   readonly hasDoc: boolean;
   readonly isHidden: (type: Item["type"]) => boolean;
   readonly model: PageModel;
+  /** 原本画像の要素(埋め込み画像の範囲に不透明で描き写す) */
+  readonly pageImage: HTMLImageElement | null;
+  /** 原本画像が覆うページの大きさ(pt) */
+  readonly pageSize: PageSize | null;
   readonly resources: PageResources;
   readonly selection: Selection | null;
   readonly view: View;
@@ -74,41 +77,30 @@ const drawGlyphs = (
   }
 };
 
-// 埋め込み画像: 回転なしはbboxへ、回転・せん断ありは画像の左上/右上/左下を四隅に合わせたアフィン変換で描く
-const drawImageItem = (
+// 埋め込み画像は画素を取得せず、範囲の中だけ原本画像を不透明で描き写す(下敷きの濃さによらず絵柄が見える)。
+// 範囲は全画像をまとめた1つの Path2D なので、原本画像の描画は1回で済む(ADR 0039)
+const drawOriginalIn = (
   ctx: CanvasRenderingContext2D,
-  it: ImageItem,
+  region: Path2D,
+  { pageImage, pageSize }: SceneInput
+): void => {
+  if (!(pageImage?.complete && pageImage.naturalWidth && pageSize)) {
+    return;
+  }
+  ctx.save();
+  ctx.clip(region);
+  ctx.drawImage(pageImage, 0, 0, pageSize.width, pageSize.height);
+  ctx.restore();
+};
+
+const strokeImageFrames = (
+  ctx: CanvasRenderingContext2D,
+  region: Path2D,
   input: SceneInput
 ): void => {
-  const el = input.resources.images.get(it.index);
-  if (!(el?.complete && el.naturalWidth)) {
-    return;
-  }
-  const [x0, top, x1, bottom] = it.bbox;
-  // 画面上で画像1画素が2px以上に拡大されたら補間せず画素をそのまま見せる
-  ctx.imageSmoothingEnabled =
-    (input.view.scale * (x1 - x0)) / el.naturalWidth < 2;
-  if (it.placement === "bbox") {
-    ctx.drawImage(el, x0, top, x1 - x0, bottom - top);
-    return;
-  }
-  const q = it.quad; // 左下, 右下, 右上, 左上
-  const [blx, bly, trx, trY, tlx, tly] = [0, 1, 4, 5, 6, 7].map((i) =>
-    at(q, i)
-  ) as [number, number, number, number, number, number];
-  const w = el.naturalWidth;
-  const h = el.naturalHeight;
-  ctx.save();
-  ctx.transform(
-    (trx - tlx) / w,
-    (trY - tly) / w,
-    (blx - tlx) / h,
-    (bly - tly) / h,
-    tlx,
-    tly
-  );
-  ctx.drawImage(el, 0, 0);
-  ctx.restore();
+  ctx.strokeStyle = TYPE_COLORS.image;
+  ctx.lineWidth = MIN_DRAW_PX / input.view.scale;
+  ctx.stroke(region);
 };
 
 const strokeBatches = (
@@ -138,12 +130,10 @@ export const drawScene = (
   const { items } = input.model;
   pageTransform(ctx, input);
   ctx.globalAlpha = input.selection ? DIM_ALPHA : 1;
-  if (!input.isHidden("image")) {
-    for (const it of items) {
-      if (isImage(it)) {
-        drawImageItem(ctx, it, input);
-      }
-    }
+  const regions = input.resources.imageRegions;
+  if (regions && !input.isHidden("image")) {
+    drawOriginalIn(ctx, regions, input);
+    strokeImageFrames(ctx, regions, input);
   }
   ctx.lineCap = "butt";
   ctx.lineJoin = "miter";
@@ -217,12 +207,11 @@ const drawGroup = (
   input: SceneInput
 ): void => {
   const pad = highlightPad(input.view.scale, HL_PAD_MIN_PX, HL_PAD_MAX_PX);
-  // 画像は不透明なので先に描き直し、その上に枠を重ねる。
+  // 画像は範囲の原本画像を減光前の濃さで先に描き直し、その上に枠を重ねる。
   // 線・文字は縁取り(黄)を先に描き、その上に減光前の本来の色で描き直す
-  for (const it of group.areas) {
-    if (isImage(it)) {
-      drawImageItem(ctx, it, input);
-    }
+  const images = imageRegionsOf(group.areas);
+  if (images) {
+    drawOriginalIn(ctx, images, input);
   }
   ctx.strokeStyle = GROUP_COLOR;
   for (const b of group.strokes) {

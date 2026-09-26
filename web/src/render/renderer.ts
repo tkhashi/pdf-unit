@@ -1,7 +1,7 @@
 // store の変化を購読して Canvas を描き直す。React の再レンダーを通さず、1フレームに1回だけ描く
 
 import { hiddenPredicate } from "../domain/visibility";
-import type { AppState } from "../state/state";
+import { type AppState, currentPageSize } from "../state/state";
 import type { AppStore } from "../state/store";
 import { type DomRefs, devicePixelRatio } from "./dom";
 import { drawHighlights, drawScene, type SceneInput } from "./draw";
@@ -26,11 +26,13 @@ const sceneChanged = (s: AppState, p: AppState): boolean =>
 const highlightChanged = (s: AppState, p: AppState): boolean =>
   s.hovered !== p.hovered || s.selection !== p.selection;
 
-const sceneInput = (s: AppState): SceneInput => ({
+const sceneInput = (s: AppState, dom: DomRefs): SceneInput => ({
   dpr: devicePixelRatio(),
   hasDoc: s.doc !== null,
   isHidden: hiddenPredicate(s.visibility),
   model: s.page.model,
+  pageImage: dom.pageImage,
+  pageSize: currentPageSize(s),
   resources: resourcesOf(s.page.model),
   selection: s.selection,
   view: s.view,
@@ -50,7 +52,7 @@ export const createRenderer = (app: AppStore, dom: DomRefs): Renderer => {
   const frame = () => {
     pending = false;
     const s = app.getState();
-    const input = sceneInput(s);
+    const input = sceneInput(s, dom);
     const scene = dom.sceneCanvas?.getContext("2d");
     if (sceneDirty && scene) {
       drawScene(scene, input);
