@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import ast
+import codecs
 import ctypes
 import math
 import re
+import unicodedata
 from typing import Any, TypedDict
 
 import pdfplumber
@@ -320,12 +323,110 @@ def _restore_cid_chars(
     return fixed
 
 
+_BYTES_REPR_RE = re.compile(r"""b(['"]).*\1""", re.DOTALL)
+# BOMで文字コードが明示されている場合(長いBOMから順に照合する)
+_BOMS = ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF16_BE, "utf-16-be"), (codecs.BOM_UTF16_LE, "utf-16-le"))
+
+
+def _raw_font_name(name: Any) -> bytes | str | None:
+    """pdfminerのフォント名を元のバイト列に戻す。UTF-8で読めた名前はstrのまま返す。
+
+    pdfminerはUTF-8で読めない名前を `str(bytes)` にする(`"b'\\x82l...'"`)ので、literal_evalで損失なく戻せる。
+    FontNameが名前でなく文字列オブジェクトの場合はbytesのまま渡ってくる。
+    """
+    if isinstance(name, bytes) or name is None:
+        return name
+    if _BYTES_REPR_RE.fullmatch(name):
+        try:
+            value = ast.literal_eval(name)
+        except (ValueError, SyntaxError):
+            return name
+        if isinstance(value, bytes):
+            return value
+    return name
+
+
+def _strip_bom(raw: bytes) -> tuple[bytes, str | None]:
+    for bom, encoding in _BOMS:
+        if raw.startswith(bom):
+            return raw[len(bom):], encoding
+    return raw, None
+
+
+def _utf16_without_bom(raws: list[bytes]) -> str | None:
+    """BOMの無いUTF-16は、ASCII部分の上位(下位)バイトの0x00が偶数(奇数)位置に並ぶことで判定する。"""
+    if not raws or any(len(r) % 2 or b"\x00" not in r for r in raws):
+        return None
+    even = sum(r[0::2].count(0) for r in raws)
+    odd = sum(r[1::2].count(0) for r in raws)
+    return "utf-16-be" if even > odd else "utf-16-le" if odd > even else None
+
+
+def _decode_all(raws: list[bytes], encoding: str) -> list[str] | None:
+    """全名前を読めた場合だけ結果を返す。制御文字・私用領域の文字が出る場合も読めなかったとみなす
+    (cp932 は 0x80 や 0xFD〜0xFF をエラーにせず、これらの文字に割り当ててしまうため)。
+    """
+    try:
+        decoded = [r.decode(encoding) for r in raws]
+    except UnicodeDecodeError:
+        return None
+    if any(unicodedata.category(ch) in ("Cc", "Co", "Cs") for name in decoded for ch in name):
+        return None
+    return decoded
+
+
+def _pdf_name_notation(raw: bytes) -> str:
+    """文字コードを決められない名前は推測せず、PDFの名前表記(`#82`形式)で表示する。"""
+    return "".join(chr(b) if 0x21 <= b <= 0x7E and b != 0x23 else f"#{b:02X}" for b in raw)
+
+
+def decode_font_names(names: list[Any]) -> dict[Any, str]:
+    """1ページ分のフォント名を表示用の文字列にする(ADR 0021)。
+
+    1ページの中で文字コードは1種類と仮定し、BOMの無い非ASCIIの名前はページ内でまとめて判定する。
+      1. ASCIIだけの名前はそのまま
+      2. BOM(UTF-8 / UTF-16BE / UTF-16LE)があればそれに従う(名前ごと)
+      3. 全名前が UTF-8 で読めれば UTF-8
+      4. 0x00 を含む偶数長の名前ばかりなら BOM無し UTF-16
+      5. 全名前が Shift_JIS(cp932)で読めれば cp932
+      6. どれにも当てはまらなければ推測せず PDF の名前表記(`#82`形式)
+    pdfminerがUTF-8で読めた名前も判定に含める(Shift_JISのバイト列が偶然UTF-8として読める場合があるため)。
+    """
+    result: dict[Any, str] = {}
+    undecided: dict[Any, bytes] = {}
+    for name in dict.fromkeys(n for n in names if n is not None):
+        raw = _raw_font_name(name)
+        if isinstance(raw, str):
+            if raw.isascii():
+                result[name] = raw
+                continue
+            raw = raw.encode("utf-8")
+        body, encoding = _strip_bom(raw)
+        if encoding is not None:
+            try:
+                result[name] = body.decode(encoding)
+                continue
+            except UnicodeDecodeError:
+                pass
+        undecided[name] = raw
+    if undecided:
+        raws = list(undecided.values())
+        decoded = None
+        for encoding in ("utf-8", _utf16_without_bom(raws), "cp932"):
+            if encoding and (decoded := _decode_all(raws, encoding)) is not None:
+                break
+        for i, (name, raw) in enumerate(undecided.items()):
+            result[name] = decoded[i] if decoded is not None else _pdf_name_notation(raw)
+    return result
+
+
 def extract_page_texts(page: pdfplumber.page.Page, pdf_data: bytes, page_no: int) -> list[TextRecord]:
     """文字を単語単位にまとめる。フォント・サイズ・色が変わる箇所では別単語に分ける。"""
     chars = _restore_cid_chars(page.chars, pdf_data, page_no, page.height)
     words = extract_words(
         chars, extra_attrs=["fontname", "size", "non_stroking_color"], return_chars=True
     )
+    font_names = decode_font_names([w.get("fontname") for w in words])
     records: list[TextRecord] = []
     for w in words:
         if not w["text"].strip():
@@ -336,7 +437,7 @@ def extract_page_texts(page: pdfplumber.page.Page, pdf_data: bytes, page_no: int
                 "type": "text",
                 "text": w["text"],
                 "bbox": (w["x0"], w["top"], w["x1"], w["bottom"]),
-                "fontname": w.get("fontname"),
+                "fontname": font_names.get(w.get("fontname")),
                 "size": round(w["size"], 2) if w.get("size") else None,
                 "color": _color_to_css(w.get("non_stroking_color")),
                 "chars": glyphs,
