@@ -41,10 +41,11 @@ rebase で既に push 済みの履歴を書き換えた場合は `git push --for
    - 確認方法には実際に実行したものだけを書く
    - HTML コメント(`<!-- -->`)は消す
    - 末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` を付ける
-3. 本文をスクラッチディレクトリのファイルに書き、作成する
+3. 本文をスクラッチディレクトリのファイルに書き、種別に応じたラベルを付けて作成する(自動生成のリリースノートの分類に使う。ADR 0033)
+   - `feat` → `enhancement`、`fix` → `bug`、`docs` → `documentation`
 
 ```sh
-gh pr create --base development --title "<種別>: <日本語の簡潔なタイトル>" --body-file <本文ファイル>
+gh pr create --base development --title "<種別>: <日本語の簡潔なタイトル>" --label <ラベル> --body-file <本文ファイル>
 ```
 
 ## 5. マージ
@@ -55,4 +56,4 @@ git switch development
 git pull --ff-only
 ```
 
-マージ後、PR の URL をユーザーに伝える。main への反映(本番デプロイ)はユーザーの指示を待つ。
+マージ後、PR の URL をユーザーに伝える。main への反映(本番デプロイ)はユーザーの指示を待つ。指示を受けてリリース PR を作るときは、CLAUDE.md「バージョン」に従って `release` ラベル(軽微な変更だけなら `semver:patch` も)を付ける。

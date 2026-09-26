@@ -29,7 +29,24 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 - `main`: 本番。`main` への反映はそのまま AWS へのデプロイになる(「デプロイ」参照)ため、手動で行うか、エージェントには明示的に指示したときのみ行わせます
 - 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)
 
-作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。
+作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。`development` 向けの PR には種別に応じたラベル(`feat` → `enhancement`、`fix` → `bug`、`docs` → `documentation`)を付けます(自動生成のリリースノートの分類に使います)。
+
+### バージョン
+
+版は `vX.Y.Z` 形式で、正は Git のタグです(ADR 0033)。`pyproject.toml`・`web/package.json` の `version` は使いません。
+
+- `main` へのマージ(本番デプロイ)のたびに2桁目を上げます
+- 機能の追加・変更がなく、バグ修正や UI のレイアウト調整のような軽微な変更だけのリリースでは、3桁目を上げます
+- 1桁目は、よほど大きな変更があるときだけ上げます(判断はリポジトリの管理者が行います)
+
+上げる桁は、リリース PR(`development` → `main`)のラベルで指定します。ラベルなしなら2桁目、`semver:patch` なら3桁目、`semver:major` なら1桁目です。リリース PR には、リリースノートの一覧から除くための `release` ラベルも付けます。
+
+```sh
+gh pr create --base main --head development --label release                       # 2桁目を上げる
+gh pr create --base main --head development --label release --label semver:patch  # 3桁目を上げる
+```
+
+デプロイが成功すると、ワークフローがタグ `vX.Y.Z` と GitHub のリリースを作ります。リリースノートは GitHub の自動生成で、`.github/release.yml` の設定に従って PR のラベルごとに分類されます。画面のツールバーには、アプリ名の横に版が表示されます。手元のビルドでは `git describe --tags --always --dirty` の値になります。タグは `main` のマージコミットに付き、`development` 系のブランチからは辿れないため、通常はコミットのハッシュ(例: `va202736-dirty`)が表示されます。
 
 ### UI の開発
 
@@ -62,11 +79,13 @@ pnpm --dir web fix      # 整形と自動修正(ultracite fix)
 
 `main` にマージすると、GitHub Actions(`.github/workflows/deploy.yml`)が AWS へ自動で反映します(ADR 0021)。
 
-1. pnpm と Node.js を用意し、`scripts/build_lambda.sh` で UI をビルドして(`src/pdf_unit/static`)、Lambda 用の zip(`dist/lambda.zip`)を組み立てる
-2. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
-3. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
-4. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
-5. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・画面が参照する `assets/`・API・応答の gzip 圧縮・OAC)
+1. `scripts/next_version.sh` で版を決める(最新のタグと、リリース PR のラベルから。コミットにすでにタグがあればその版)
+2. pnpm と Node.js を用意し、`scripts/build_lambda.sh` で UI をビルドして(`src/pdf_unit/static`。版は環境変数 `APP_VERSION` で埋め込む)、Lambda 用の zip(`dist/lambda.zip`)を組み立てる
+3. OIDC で AWS のロールを引き受ける(長期のアクセスキーは使いません)
+4. `aws lambda update-function-code` で Lambda のコードを差し替え、反映を待つ
+5. `aws s3 sync` で `src/pdf_unit/static` を S3 に置き、CloudFront のキャッシュを無効化する
+6. `scripts/smoke_test.sh` で公開URLの動作を確認する(画面・画面が参照する `assets/`・API・応答の gzip 圧縮・OAC)
+7. 新しい版なら、タグ `vX.Y.Z` と GitHub のリリース(自動生成のリリースノート)を作る。デプロイに失敗した場合は作らないので、再実行すれば同じ版になります
 
 AWS のリソース(S3・Lambda・CloudFront・このワークフローが引き受けるロール)は別リポジトリ `pdf-unit.infra` が定義し、そちらは手動でデプロイします。初回の準備(リポジトリ変数の登録など)は `pdf-unit.infra` の README「アプリのデプロイ」を参照してください。
 
@@ -93,7 +112,7 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 ## 画面構成
 
 - **ヘッダー(ツールバー)**: カテゴリごとに縦線で区切り、次の順に並びます。画面幅に収まらない場合は折り返します
-  - アプリ名 | 「開く」・開いているファイル名・「3 / 108 ページ」 | 表示切替(両方 / ベクター / ラスター のセグメントボタン) | 種類別の凡例(一括チェック、種類ごとの件数・表示切替) | 原本の濃さ | 線幅補正の係数 … `?`(操作説明、右端)
+  - アプリ名と版(例: `v0.2.0`、小さく表示) | 「開く」・開いているファイル名・「3 / 108 ページ」 | 表示切替(両方 / ベクター / ラスター のセグメントボタン) | 種類別の凡例(一括チェック、種類ごとの件数・表示切替) | 原本の濃さ | 線幅補正の係数 … `?`(操作説明、右端)
   - 各項目はマウスを乗せると約0.25秒で機能の補足を表示します。`?` はクリック(または Enter)で操作説明の表示を固定でき、もう一度クリックするか Esc で閉じます
   - ページの移動は左のサムネイル一覧から行います
 - **左: サムネイル一覧**: 各ページを元PDFのまま縮小表示します。クリックでページを切り替え、現在のページは青枠で強調されます。一覧の右(図面との境目)に隣接する細長いボタン(`◀`/`▶`)で開閉します(閉じてもボタンは残ります)
@@ -229,7 +248,9 @@ scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
   profile_pages.py ページごとの API の性能計測
-.github/workflows/deploy.yml  main へのマージで AWS へ反映
+  next_version.sh  デプロイする版の決定(タグとリリース PR のラベルから)
+.github/workflows/deploy.yml  main へのマージで AWS へ反映し、版のタグとリリースを作る
+.github/release.yml  自動生成のリリースノートの分類
 .github/pull_request_template.md  PR 本文のテンプレート
 .claude/settings.json  Claude Code のフック設定(ブランチ運用の検査)
 .claude/hooks/guard-git.sh  git/gh 操作を検査するフック
