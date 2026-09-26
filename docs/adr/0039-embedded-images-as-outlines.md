@@ -2,6 +2,7 @@
 
 - ステータス: 採用([0010](0010-embedded-raster-images.md) の画像データの再描画を置き換え。UI は [0026](0026-embedded-image-png-on-demand.md)・[0032](0032-embedded-images-batch-api.md) の API を使わなくなった)
 - 日付: 2026-09-26
+- 追記(2026-09-26): [0040](0040-remove-embedded-image-data-api.md) で、使われなくなった `/api/page/images/{k}`・`/api/page/images` を削除しました。
 
 ## コンテキスト
 

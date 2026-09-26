@@ -189,8 +189,6 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 | POST | `/api/thumbs?width=` | サムネイル。ボディのPDFの全ページ(最大10)、幅60〜400px。`{thumbs: [{page, png_base64}]}`(`page` は送ったPDF内でのページ番号) |
 | POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
-| POST | `/api/page/images/{k}` | 埋め込み画像 k の画像データ。`{png_base64}`(UI は使っていません。ADR 0039) |
-| POST | `/api/page/images?start=&count=` | 埋め込み画像 `start` 番以降の画像データをまとめて返す(`count` は既定100・上限500)。base64 の合計が5.5MB に収まるところで区切る。`{images: [{index, png_base64}], total, next}`(`next` は続きの画像番号、無ければ `null`)。各画像は `/api/page/images/{k}` とバイト単位で同じ([ADR 0032](docs/adr/0032-embedded-images-batch-api.md))。UI は使っていません |
 | GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
 | GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
 
@@ -199,7 +197,7 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 - ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIは切り出したPDFごとに計算し、1ページ分の切り出し結果は直近6ページ分を使い回します
 - 1回に送るPDF(切り出したページ)の上限は 4MB(4 × 1024 × 1024 バイト)です。PDF全体の大きさには上限がありません。UIは超過するページを送らずにエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
 - ボディは `Content-Encoding: gzip` で圧縮して送ることもできます(ADR 0034)。上限の 4MB は送る(圧縮後の)大きさにかかり、展開後は 64MB まで受け付けます(超えると 413、壊れた gzip は 400、gzip 以外の圧縮形式は 415)。`x-amz-content-sha256` は圧縮後のボディで計算します。応答は圧縮なしで送った場合と同じです。UI はまだ圧縮して送っていません(Issue #8)
-- 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
+- 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直します(Lambda のレスポンス上限 6MB に収めるため)
 - `Accept-Encoding: gzip` を付けたリクエストには、応答を gzip(圧縮レベル4)で圧縮して返します(ブラウザは自動で付け、自動で展開します)。線数の多いページの抽出結果は JSON で6MBを超えることがありますが、圧縮すると1/6前後になり Lambda の上限に収まります(ADR 0024)。CloudFront を通しても圧縮が効いていることは `scripts/smoke_test.sh` で確かめます
 - PDFium で開けないPDF(途中で切れている、ページツリーが壊れている等)は 400、ページ・画像番号が範囲外の場合は 404 を返します
 - ページや文書を切り替えると、UI は前のページの線データ・原本画像の要求を取り消します(`AbortController`。ADR 0039)
@@ -210,9 +208,8 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 高速化は、計測で支配的と分かった箇所から、出力(応答ボディ)が変わらない範囲で行います([ADR 0023](docs/adr/0023-performance-measurement.md))。pdfplumber から PDFium への移行は、出力の変化を受け入れた例外です([ADR 0038](docs/adr/0038-migrate-to-pypdfium2.md))。計測の仕組みは次の4つです。
 
 - **`Server-Timing` / `X-Perf-Metrics` ヘッダー**: 区間の所要時間(ミリ秒)と件数です。区間名の `.` は内訳を表し(`calib.render` は `calib` の内訳)、`.` を含まない区間の合計がその API の処理時間の目安になります。`lock_wait` は PDFium のロック待ちの時間です
-  - `/api/page/lines`: `open`(PDFを開く)・`parse`(PDFium による図形・文字の読み取り。内訳 `parse.paths`・`parse.chars`)・`vectors`(線のレコード作成)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.unreadable`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)。すべて PDFium のロック内で処理します
+  - `/api/page/lines`: `open`(PDFを開く)・`parse`(PDFium による図形・文字の読み取り。内訳 `parse.paths`・`parse.chars`)・`vectors`(線のレコード作成)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.unreadable`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像の配置。内訳 `images.decode`)。すべて PDFium のロック内で処理します
   - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
-  - `/api/page/images/{k}`・`/api/page/images`: `open`・`images`・`downscale`
 - **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`(圧縮後の転送される大きさ)・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
 - **ブラウザのコンソール**: `console.debug`(DevTools の Console で Verbose を有効にすると表示)に、API 呼び出しごとの所要時間・送受信サイズ・`Server-Timing`、ページ切り出しの時間、ページ切替からの経過(線データ受信・描画準備完了・初回描画完了・原本画像表示)を出します
 - **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します。ブラウザと同じく `Accept-Encoding: gzip` を付けて送り、応答の大きさは展開後(`resp_bytes`)・転送される大きさ(`wire_bytes`)・Lambda の上限と比べる大きさの推定(`lambda_bytes`。圧縮した応答は Lambda Web Adapter が base64 化するため4/3倍)を記録します
@@ -225,7 +222,7 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 
 - 1回の API 呼び出しごとに子プロセスを起動し、ASGI アプリに直接 POST します(Depends・JSON 直列化・ミドルウェアを含む実際の経路)。子プロセスの最大メモリを、その呼び出しのピークメモリとみなします
 - ページの切り出しは UI と同じ pdf-lib(`web/node_modules/pdf-lib`。`pnpm --dir web install` で入ります)を Node.js で動かして行います。Node.js か pdf-lib が無い場合は pypdfium2 で切り出しますが、UI が送るバイト列とは異なるため、計測値の比較には注意してください
-- 計測する API は `--endpoints`(既定 `lines,image,images,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)、1ページで計測する埋め込み画像の数は `--max-images`(既定3、0で全件)で指定します
+- 計測する API は `--endpoints`(既定 `lines,image,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)で指定します
 - 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
 ### 変更前後の応答の比較
