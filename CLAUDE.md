@@ -36,9 +36,10 @@
 
 ## 開発時の注意
 
-- PDFium(pypdfium2、pdfplumber の `page.to_image` を含む)はスレッドセーフではない。PDFium を使う処理を追加する場合は必ず `server.py` の `_pdfium_lock` の中で行う(ADR 0011)
-- 高速化は精度より優先しない。座標の丸め・非可逆な画像形式・結果が変わりうるキャッシュなど出力が変わる手段は採らず、`scripts/profile_pages.py` で計測してから着手し、`--dump` で変更前後の応答ボディが一致することを確かめる(ADR 0023)
-- 座標は pdfplumber の表示座標(左上原点、pt、ページ回転反映後)に統一する。PDFium から得た座標は `FPDF_PageToDevice` で変換する(ADR 0010)
+- PDFium(pypdfium2)はスレッドセーフではない。PDFium を使う処理を追加する場合は、文書を開いてから閉じる(`close()`)までを必ず `server.py` の `_pdfium_lock` の中で行う。ロックの外に PDFium のオブジェクト(遅延評価の値や、画像の bitmap を共有する PIL 画像を含む)を持ち出さない(ADR 0011, 0038)
+- 高速化は精度より優先しない。座標の丸め・非可逆な画像形式・結果が変わりうるキャッシュなど出力が変わる手段は採らず、`scripts/profile_pages.py` で計測してから着手し、`--dump` で変更前後の応答ボディが一致することを確かめる(`scripts/compare_dumps.py` で比べられる。ADR 0023)
+- 座標は、ページの表示範囲(CropBox と MediaBox の交わり)の左上原点、pt、ページ回転反映後に統一する。図形・文字は `pdfium_page.PdfiumPage`、埋め込み画像は `raster.PageToDisplay` でこの座標系にする。PDFium の float32 の値は `_decimal` で10進数に戻してから計算する(ADR 0010, 0038)
+- サーバーを変更したら `uv run pytest` を通す(合成PDFは `tests/fixtures.py`)
 - Lambda の実行環境に関わる値(Python の版・アーキテクチャ・zip 直下の `run.sh`・待ち受けポート・`GET /` の起動確認)は `pdf-unit.infra` の Lambda 定義との約束事。`scripts/build_lambda.sh` でこれらを変える場合は、infra 側も合わせて変更する(README「infra との約束事」、ADR 0021)
 - 動作確認でサーバーを起動するときは、ユーザーが使っている `127.0.0.1:8000` と衝突しないよう別ポート(例: `.venv/bin/uvicorn pdf_unit.server:app --port 8765`)を使い、停止は自分が起動したプロセスの PID を指定して行う(`pkill -f` で名前一致させると、ユーザーのサーバーまで止めてしまう)
 - UI は `web/`(React + TypeScript、pnpm)。状態は `state/` の store と純粋関数の reducer だけで変え、`components/` は props だけを受け取り状態を持たない。API 呼び出しは `controllers/` から行い、`useEffect` からは呼ばない(ADR 0028)

@@ -1,6 +1,6 @@
 # PDF Unit
 
-PDF(主に建築図面)を開くと、pdfplumber / PDFium で検出した線・文字・埋め込み画像を種類別に色分けして再描画し、マウスオーバーやクリックで個々の要素や同じ属性を持つ要素群をハイライトできるWebアプリです。ローカルでも、AWS Lambda 上でも(ステートレスなサーバーとして)動作します。
+PDF(主に建築図面)を開くと、PDFium(pypdfium2)で検出した線・文字・埋め込み画像を種類別に色分けして再描画し、マウスオーバーやクリックで個々の要素や同じ属性を持つ要素群をハイライトできるWebアプリです。ローカルでも、AWS Lambda 上でも(ステートレスなサーバーとして)動作します。
 
 検出結果が元のPDFとどれだけ一致しているかを目視で確かめる用途を想定しており、元のPDFを描画した「原本」画像を薄く下敷きにして重ねて表示します(検出されなかった要素は原本の灰色として見えます)。
 
@@ -28,6 +28,8 @@ AWS では CloudFront → Lambda 関数URL(OAC)の構成で、AWS Lambda Web Ada
 - `development`(既定ブランチ): 開発中の変更を集めるブランチ。直接コミット・push はせず、PR でのみ変更します
 - `main`: 本番。`main` への反映はそのまま AWS へのデプロイになる(「デプロイ」参照)ため、手動で行うか、エージェントには明示的に指示したときのみ行わせます
 - 作業ブランチ: `development` から作成し、名前は `feat-`(機能追加)・`fix-`(不具合修正)・`docs-`(文書のみ)に英小文字・数字・ハイフンの説明を続けます(例: `feat-thumbnail-cache`)。作業は `git worktree add ~/.claude/worktrees/pdf-unit-<ブランチ名> -b <ブランチ名> origin/development` で作った専用の作業ディレクトリで行い、主のチェックアウトでブランチを切り替えません
+
+サーバー(Python)の変更は `uv run pytest` で確かめます(`tests/`。合成PDFで抽出結果・座標・エラー応答を検証します)。
 
 作業が終わったら `development` 向けの PR を作り、squash マージします。`development` から `main` への反映は `gh pr create --base main --head development` で PR を作り、merge commit でマージします(squash すると両ブランチの履歴が分かれ、次回の反映で衝突しやすくなるため)。PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書きます。`development` 向けの PR には種別に応じたラベル(`feat` → `enhancement`、`fix` → `bug`、`docs` → `documentation`)を付けます(自動生成のリリースノートの分類に使います)。
 
@@ -123,10 +125,10 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 
 | 種類 | 色 | 抽出元 |
 | --- | --- | --- |
-| line | 青 | pdfplumber `page.lines` |
-| rect | 緑 | pdfplumber `page.rects` |
-| curve | 紫 | pdfplumber `page.curves`(ベジェ曲線を保持) |
-| text | 橙 | pdfplumber の文字を単語単位にまとめたもの |
+| line | 青 | 1本の線分のパス |
+| rect | 緑 | 軸に平行な閉じた四角形のパス |
+| curve | 紫 | それ以外のパス(ベジェ曲線を保持) |
+| text | 橙 | 文字を単語単位にまとめたもの |
 | image | 元画像のまま | PDFium で抽出した埋め込みラスター画像 |
 
 ヘッダーの表示切替(セグメントボタン)で、両方 / ベクター(線・文字のみ) / ラスター(埋め込み画像のみ) のどれか1つを選べます。凡例のチェックボックスで種類ごとの表示/非表示も切り替えられ、凡例先頭の一括チェックで5種類をまとめて切り替えられます(全部表示中はチェック、一部だけ表示中は「−」、全部非表示は空。押すと、全部表示中なら全部非表示、それ以外なら全部表示)。非表示の要素はホバー・クリックの対象外です。
@@ -148,27 +150,27 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 
 ### 属性の定義
 
-- **線幅**: PDF が報告する線幅(linewidth)の値そのもの
+- **線幅**: PDF の線幅(`w`)に描画時の座標変換の拡大率を掛けた、ページ上の太さ(pt)
 - **描画太さ**: 実際に描画される太さ(線幅 × 線幅補正係数)。補正係数は原本画像から孤立した直線の太さを実測して自動算出します
 - **長さ**: line の長さ(pt、0.01pt単位で一致判定)
 - **形状**: 回転・反転・一様な拡大縮小・平行移動を許容した同一形状(相似形)。X/Yで倍率が異なる変形は別形状として扱います
 - **色**: 線は描画色、文字は塗り色(CSS の `rgb()` 表記で完全一致)
 - **濃淡**: 色の輝度から求めた濃度(0%=白〜100%=黒)を5%刻みで一致判定
-- **フォント / サイズ**: pdfplumber のフォント名 / 文字の高さ(pt)
+- **フォント / サイズ**: フォント名(BaseFont) / 文字の高さ(pt)
 - **画素数 / 解像度 / 圧縮形式**: 埋め込み画像の元の画素数 / ページ上での実効dpi / PDFのフィルタ(`DCTDecode` 等)
 
 ## 抽出処理の仕様
 
-- **座標系**: pdfplumber の表示座標(左上原点、pt、ページ回転 `/Rotate` 反映後)に統一しています。PDFium から得た座標(埋め込み画像)は `FPDF_PageToDevice` でこの座標系に変換します
-- **線幅補正**: pdfplumber の報告する線幅(linewidth)は CAD のペン幅がそのまま入っている等で実際の描画太さと一致しないことがあるため、原本画像での実測値との比を補正係数として使います(ClassifierArchDrawingByJev の `calibration.py` を移植)。実測に使うのはほかの図形と重ならない孤立した直線で、孤立の判定は格子状の空間索引で近くの図形だけを調べます(結果は総当たりと同じ。[ADR 0025](docs/adr/0025-calibration-spatial-index.md))。ヘッダーには「線幅補正 ×0.18」のように係数を表示し、算出できなかった場合(補正なし)は「線幅補正 -」と表示します。算出方法はマウスオーバーで補足します
+PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFium から pdfplumber の Page と同じ形に組み立てたデータ(`src/pdf_unit/pdfium_page.py`)を読みます(ADR 0038)。
+
+- **座標系**: ページの表示範囲(CropBox と MediaBox の交わり。PDFium の描画範囲と同じ)の左上を原点とし、ページ回転 `/Rotate` を反映した pt に統一しています。線・文字・埋め込み画像・原本画像はすべてこの座標系で一致します。PDFium の API が返す float32 の値は「float32 として同じ値になる最短の10進数」に戻してから計算し、PDF に書かれた数値(有効数字7桁まで)を再現します
+- **図形**: パスをサブパスごとに分け、線分1本(`m l`)は line、軸に平行な閉じた四角形は rect、それ以外は curve とします(pdfminer.six と同じ規則)。`v`/`y` 演算子の曲線もベジェとして保持します。線幅は描画時の座標変換の拡大率を掛けた太さ、色は PDFium が色空間(Separation・ICC 等を含む)を RGB に変換した値です
+- **線幅補正**: 線幅が実際の描画太さと一致しないPDFに備え、原本画像での実測値との比を補正係数として使います(ClassifierArchDrawingByJev の `calibration.py` を移植)。実測に使うのはほかの図形と重ならない孤立した直線で、孤立の判定は格子状の空間索引で近くの図形だけを調べます(結果は総当たりと同じ。[ADR 0025](docs/adr/0025-calibration-spatial-index.md))。ヘッダーには「線幅補正 ×0.18」のように係数を表示し、算出できなかった場合(補正なし)は「線幅補正 -」と表示します。算出方法はマウスオーバーで補足します
 - **文字**:
-  - 単語単位にまとめ、フォント・サイズ・色が変わる箇所で区切ります
-  - 描画位置・回転は文字の変換行列から、描画サイズはフォントサイズ(外接矩形・送り幅・行列から逆算)と行列の縦倍率から求めます
-  - ToUnicode 情報を持たないフォントで pdfminer が `(cid:N)` と出す文字は、次の順で補完します([ADR 0018](docs/adr/0018-cid-restoration-rotation-and-validation.md))
-    1. PDFium の文字解釈を文字位置(ページ回転を反映した表示座標)で突き合わせ、PDFium が実際に対応を見つけた文字を使う
-    2. CID の値そのものが Unicode であるフォント(フォント内の文字の9割以上がよく使われる文字の範囲に収まる)は、CID をそのまま文字として使う
-    3. どちらでも決まらない文字は「□」で表示し、属性パネルに「読めない文字: N字」と表示する
-  - 本文の文字コード(Shift_JIS・UTF-16・UTF-8 等)はフォントの Encoding(CMap。`90ms-RKSJ-H`、`UniJIS-UTF16-H`、`UniJIS-UTF8-H` 等)と ToUnicode に従って pdfminer が解釈します。文字コードの推測は行いません
+  - 単語単位にまとめ、フォント・サイズ・色が変わる箇所で区切ります(pdfplumber の `extract_words` を `src/pdf_unit/_vendor/` に取り込んで使っています)
+  - 描画位置・回転は文字の変換行列から、描画サイズはフォントサイズ(外接矩形・送り幅・行列から逆算)と行列の縦倍率から求めます。横倍率(`Tz`)も反映します
+  - 本文の文字コードは、フォントの Encoding(CMap)と ToUnicode に従って PDFium が解釈します。文字コードの推測は行いません
+  - ToUnicode が無く Unicode に引けない文字は、フォント単位で判定して「□」で表示し、属性パネルに「読めない文字: N字」と表示します。フォント内の文字の9割以上がよく使われる文字(かな・漢字・英数字・記号等)の範囲に収まらない場合、そのフォントの文字をすべて読めないとみなします(ADR 0038)
 - **フォント名の文字コード**: PDF のフォント名は文字コードの宣言を持たないバイト列のため、ページ単位で自動判定します([ADR 0021](docs/adr/0021-font-name-encoding-per-page.md))。1ページの中で使われる文字コードは1種類と仮定しています
   1. ASCII だけの名前はそのまま表示する
   2. BOM(UTF-8 / UTF-16BE / UTF-16LE)がある名前はそれに従う
@@ -200,15 +202,15 @@ scripts/smoke_test.sh --local http://127.0.0.1:8000  # uv run pdf-unit で起動
 - ボディは `Content-Encoding: gzip` で圧縮して送ることもできます(ADR 0034)。上限の 4MB は送る(圧縮後の)大きさにかかり、展開後は 64MB まで受け付けます(超えると 413、壊れた gzip は 400、gzip 以外の圧縮形式は 415)。`x-amz-content-sha256` は圧縮後のボディで計算します。応答は圧縮なしで送った場合と同じです。UI はまだ圧縮して送っていません(Issue #8)
 - 画像はPNGのbase64文字列としてJSONで返します。base64が 5.5MB を超える場合、原本画像は解像度を下げて描き直し、埋め込み画像は縮小して返します(Lambda のレスポンス上限 6MB に収めるため)
 - `Accept-Encoding: gzip` を付けたリクエストには、応答を gzip(圧縮レベル4)で圧縮して返します(ブラウザは自動で付け、自動で展開します)。線数の多いページの抽出結果は JSON で6MBを超えることがありますが、圧縮すると1/6前後になり Lambda の上限に収まります(ADR 0024)。CloudFront を通しても圧縮が効いていることは `scripts/smoke_test.sh` で確かめます
-- ページ・画像番号が範囲外の場合は 404 を返します
+- PDFium で開けないPDF(途中で切れている、ページツリーが壊れている等)は 400、ページ・画像番号が範囲外の場合は 404 を返します
 - `/api/*` の応答には、処理区間ごとの所要時間を示す `Server-Timing` ヘッダーと、件数などを JSON で示す `X-Perf-Metrics` ヘッダーが付きます(「性能の計測」参照)
 
 ## 性能の計測
 
-高速化は、計測で支配的と分かった箇所から、出力(応答ボディ)が変わらない範囲で行います([ADR 0023](docs/adr/0023-performance-measurement.md))。計測の仕組みは次の4つです。
+高速化は、計測で支配的と分かった箇所から、出力(応答ボディ)が変わらない範囲で行います([ADR 0023](docs/adr/0023-performance-measurement.md))。pdfplumber から PDFium への移行は、出力の変化を受け入れた例外です([ADR 0038](docs/adr/0038-migrate-to-pypdfium2.md))。計測の仕組みは次の4つです。
 
 - **`Server-Timing` / `X-Perf-Metrics` ヘッダー**: 区間の所要時間(ミリ秒)と件数です。区間名の `.` は内訳を表し(`calib.render` は `calib` の内訳)、`.` を含まない区間の合計がその API の処理時間の目安になります。`lock_wait` は PDFium のロック待ちの時間です
-  - `/api/page/lines`: `open`(PDFを開く)・`parse`(pdfminer によるページの解析)・`vectors`(線の抽出)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.cid`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)
+  - `/api/page/lines`: `open`(PDFを開く)・`parse`(PDFium による図形・文字の読み取り。内訳 `parse.paths`・`parse.chars`)・`vectors`(線のレコード作成)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.unreadable`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像。内訳 `images.decode`・`images.png`)。すべて PDFium のロック内で処理します
   - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
   - `/api/page/images/{k}`・`/api/page/images`: `open`・`images`・`downscale`
 - **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`(圧縮後の転送される大きさ)・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
@@ -226,41 +228,27 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 - 計測する API は `--endpoints`(既定 `lines,image,images,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)、1ページで計測する埋め込み画像の数は `--max-images`(既定3、0で全件)で指定します
 - 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
-### pdfplumber → pypdfium2 移行の調査
+### 変更前後の応答の比較
 
-`pdfplumber` を使っている線・文字の抽出、ページ画像化を `pypdfium2` に置き換えられるかを調べています
-([ADR 0035](docs/adr/0035-pdfium-migration-poc.md)・[0036](docs/adr/0036-pdfium-migration-poc-result.md)・[0037](docs/adr/0037-pdfium-migration-research.md))。
-本体の `src/pdf_unit/` は変更していません。移行するかどうかは未決定です(ADR 0037 は提案)。
-
-- **`scripts/poc_pypdfium2/pdfium_page.py`**: pdfplumber の Page と同じ形(`width`・`height`・`rects`・`curves`・
-  `lines`・`chars`・`to_image()`)のデータを PDFium から作る互換クラス。既存の `extract_page_lines`・
-  `calibrate_linewidth`・`extract_page_texts` にそのまま渡せます
-- **`scripts/poc_compare.py`**: `/api/page/lines` の応答を本番と互換クラスで作って突き合わせ、処理時間を本番と同じ区間名で比べます。
-  線は要素ごと、テキストは文字の原点と単語の文字列で対応づけて比べます
-- **`scripts/poc_pypdfium2/fixtures.py`**: 差が出うる条件(ページ回転・MediaBox の原点・CropBox・複数サブパス・`v`/`y` 演算子・
-  色空間・Form XObject など)の合成PDFを書き出します
-- **`scripts/poc_pypdfium2/concurrency.py`**: ページ切替時の同時リクエスト(線データ+原本画像2解像度)を1プロセスで計ります
+`scripts/compare_dumps.py` は、`profile_pages.py --dump` で保存した2つのディレクトリを突き合わせます。原本画像・埋め込み画像はバイト単位で、線データは要素ごとのキー単位の不一致件数と数値の最大差で比べます。テキストは並び順や単語の分割の違いに影響されないよう、文字は原点の位置、単語は文字列と先頭の文字の原点で対応づけます。
 
 ```sh
-uv run python scripts/poc_compare.py 図面.pdf --pages 1-3 --label 図面A   # --label で表示名を変える(ファイル名を出さない)
-uv run python scripts/poc_pypdfium2/fixtures.py out/fixtures && uv run python scripts/poc_compare.py out/fixtures/vy.pdf
-uv run python scripts/poc_pypdfium2/concurrency.py 1ページのPDF.pdf
+uv run python scripts/profile_pages.py 図面.pdf --pages 1-5 --splitter pdflib --dump out/before --out out/before.jsonl
+# (変更後に同じ条件で out/after を取る)
+uv run python scripts/compare_dumps.py out/before out/after --jsonl out/before.jsonl out/after.jsonl
 ```
-
-- 時間は子プロセスで `--repeat` 回(既定3)計り、最小値を採ります。`--f32` で float32 の値をそのまま使います
-  (既定は「float32 として同じ値になる最短の10進数」に戻します)
-- 最初の PoC の `scripts/poc_bench.py` と `scripts/poc_pypdfium2/poc_lines.py`・`poc_texts.py`・`poc_render.py` は記録として
-  残していますが、pdfplumber 側だけ import の時間が計測に入るなどの問題があるため、計測には `poc_compare.py` を使ってください(ADR 0037)
 
 ## ファイル構成
 
 ```
 src/pdf_unit/
   server.py        FastAPIアプリ(ステートレス)、API、PDF検証、応答サイズ調整、PDFium直列化ロック
-  extract.py       線・文字の抽出(pdfplumber)、cid文字補完、フォントサイズ逆算
+  pdfium_page.py   PDFium から図形・文字を読み、pdfplumber と同じ形の dict にする。ページの描画
+  extract.py       線・文字のレコード作成、読めないフォントの判定、フォント名の文字コード判定、フォントサイズ逆算
   raster.py        埋め込み画像の抽出(PDFium)、座標変換
   calibration.py   線幅補正(ClassifierArchDrawingByJev から移植)
   timing.py        性能計測(処理区間の所要時間・件数の収集)
+  _vendor/pdfplumber/  pdfplumber 0.11.10 の extract_words と依存部分(MIT、LICENSE.txt。変更せずに取り込み)
   static/          UI のビルド成果物(pnpm --dir web build が出力。リポジトリには含めない)
 web/               UI(React + TypeScript、pnpm・Vite・Biome/ultracite・Tailwind CSS・daisyUI)
   src/domain/      純粋関数のロジック(ヒット判定・形状比較・選択・属性パネル・表示変換・文言)
@@ -275,9 +263,7 @@ scripts/
   build_lambda.sh  Lambda 用 zip の組み立て(CI と手元で共用)
   smoke_test.sh    デプロイ後の動作確認
   profile_pages.py ページごとの API の性能計測
-  poc_compare.py   pdfplumber → pypdfium2 移行の調査: /api/page/lines の応答と処理時間を本番と比較
-  poc_bench.py     最初の効果測定 PoC(記録として残す。計測には poc_compare.py を使う)
-  poc_pypdfium2/   移行調査の試作(互換クラス pdfium_page.py・合成PDF fixtures.py・同時リクエスト concurrency.py。本番コードからは参照しない)
+  compare_dumps.py profile_pages.py で保存した変更前後の応答の比較
   next_version.sh  デプロイする版の決定(タグとリリース PR のラベルから)
 .github/workflows/deploy.yml  main へのマージで AWS へ反映し、版のタグとリリースを作る
 .github/release.yml  自動生成のリリースノートの分類
@@ -285,6 +271,7 @@ scripts/
 .claude/settings.json  Claude Code のフック設定(ブランチ運用の検査)
 .claude/hooks/guard-git.sh  git/gh 操作を検査するフック
 .claude/skills/pr/   development 向け PR の作成・マージ手順(エージェント用)
+tests/             サーバーのテスト(pytest。合成PDFは tests/fixtures.py)
 docs/adr/          設計判断の記録
 ```
 
@@ -295,7 +282,11 @@ docs/adr/          設計判断の記録
 - 再描画の文字は sans-serif で描くため、元のフォントとは字形・字幅が異なります
 - フォント名の文字コードは UTF-8(BOM付きを含む)・UTF-16・Shift_JIS(cp932)・ASCII のみ判定します。1ページ内に異なる文字コードのフォント名が混在する場合や、GBK・Big5 等で書かれている場合は、誤った文字や `#82` 形式の表記になることがあります(ADR 0021)
 - 部分埋め込みフォントで文字の対応情報(ToUnicode・フォント内の cmap)が削られている場合、何の文字かを復元できず「□」で表示されます(CID が元フォントのグリフ番号のため。元フォントがあれば復元できる見込みがあります: ADR 0018)
-- 線数の多い大判図面では、ページの読み込みに数秒かかることがあります(A1 判・線約4.7万本のページで、手元の計測で約5秒。大半は pdfminer によるページの解析です)。キャッシュを持たないため、同じページを開き直すたびに抽出します
+- 線数の多い大判図面では、ページの読み込みに1秒以上かかることがあります(A1 判・線約4.7万本のページで、手元の計測で約1.6秒。PDFium による図形の読み取りと、線のレコード作成が大半です)。キャッシュを持たないため、同じページを開き直すたびに抽出します
+- UTF-8 の CMap(`UniJIS-UTF8-H` 等)で符号化された本文は PDFium が解釈できず、「□」(読めない文字)として表示されます。UTF-32 の CMap(`UniJIS-UTF32-H`)の本文は文字は正しいものの、1文字ずつ別の単語になります(ADR 0038)
+- ToUnicode の無いフォントの判定は、フォント内の文字の分布による近似です。ToUnicode があっても珍しい文字ばかりのフォントは、読めない文字(「□」)と判定されることがあります(ADR 0038)
+- 同じ文字を少しずらして2回描く太字表現は、PDFium が1文字にまとめます
+- 有効数字8桁以上で書かれた座標は、PDFium の API が float32 のため元の値を復元できず、10万分の1pt 程度ずれることがあります
 - 1ページだけで 4MB を超えるページ(大きな埋め込み画像や、小さな画像を大量に含むページなど)は処理できません(Lambda のリクエスト上限による)。PDF全体の大きさは問いません。サーバーは gzip で圧縮したリクエストを受け付けるので、UI が圧縮して送るようになれば、圧縮後に 4MB に収まるページは処理できるようになります(Issue #8)
 - 暗号化されたPDFは開けません(pdf-lib が読み込めないため)。エラーは「暗号化されたPDFは開けません」ではなく「PDFを読み込めません(…encrypted…)」と表示されます(pdf-lib のエラーの種類を判定できないため。ADR 0031)
 - 最初に文書を開くとき、ステータス欄は文書を開くまで表示されないため、「読み込み中...」や読み込みエラーは画面に出ません(2つ目以降の文書では表示されます)
