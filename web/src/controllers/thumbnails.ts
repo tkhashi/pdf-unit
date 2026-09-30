@@ -55,7 +55,7 @@ export const createThumbnailScheduler = (
   };
 
   // 監視は要求が確定したときに解除する(成功・失敗のいずれも読み込みをやり直さない)。
-  // 全ページが確定したら同じ文書を描き直すことはないので、Worker が持つPDFの複製とパース結果を解放する
+  // 全ページが確定したら同じ文書を描き直すことはないので、Worker が持つPDFとパース結果を解放する
   const settle = (
     tracking: Tracking,
     target: DocumentSession,

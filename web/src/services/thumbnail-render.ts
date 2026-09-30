@@ -69,15 +69,16 @@ const ensureWorker = (): Worker => {
   return worker;
 };
 
-/** 文書を開く。以後この文書のページは source を使って renderThumb で描画できる */
+/**
+ * 文書を開く。以後この文書のページは source を使って renderThumb で描画できる。
+ * data は複製せずに Worker へ転送する(大きいPDFで複製を増やさないため。呼び出し後の data は空になる。ADR 0050)
+ */
 export const openThumbnailSource = (
-  bytes: Uint8Array
+  data: ArrayBuffer
 ): Promise<ThumbnailSource> => {
   const docId = nextDocId;
   nextDocId += 1;
   const w = ensureWorker();
-  // Worker へ転送するので複製する(呼び出し側のバイト列には影響しない)
-  const data = bytes.slice().buffer;
   return new Promise((resolve, reject) => {
     opening.set(docId, { reject, resolve: () => resolve({ docId }) });
     w.postMessage({ data, docId, kind: "open" }, [data]);
