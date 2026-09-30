@@ -19,7 +19,7 @@ export interface DocState {
 
 /** 解析中の擬似プログレスバーの表示状態(実際の処理段階とは連動しない) */
 export interface PageProgress {
-  /** 最初の5段階に均等配分する合計見積もり時間(ms)。通信オーバーヘッドは含まない */
+  /** 最初の6段階に均等配分する合計見積もり時間(ms)。通信オーバーヘッドは含まない */
   readonly primaryMs: number;
   readonly ratio: number;
   readonly stageIndex: number;

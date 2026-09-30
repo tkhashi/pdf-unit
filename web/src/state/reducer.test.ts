@@ -56,7 +56,7 @@ describe("ページの読み込み", () => {
   });
 
   it("成功すると進捗を100%にし、少し後に消す", () => {
-    expect(loaded.page.progress).toMatchObject({ ratio: 1, stageIndex: 5 });
+    expect(loaded.page.progress).toMatchObject({ ratio: 1, stageIndex: 6 });
     const cleared = run([{ request: 1, type: "pageProgressCleared" }], loaded);
     expect(cleared.page.progress).toBeNull();
   });

@@ -29,13 +29,15 @@ describe("擬似プログレスバーの段階計算", () => {
     expect(computeProgress(0, 900, 100)).toEqual({ ratio: 0, stageIndex: 0 });
   });
 
-  it("最初の5段階を均等に進む", () => {
-    // 5段階分(primaryMs=900)を均等割り: 各180ms
-    expect(computeProgress(179, 900, 100).stageIndex).toBe(0);
-    expect(computeProgress(181, 900, 100).stageIndex).toBe(1);
-    expect(computeProgress(361, 900, 100).stageIndex).toBe(2);
-    expect(computeProgress(541, 900, 100).stageIndex).toBe(3);
-    expect(computeProgress(721, 900, 100).stageIndex).toBe(4);
+  it("最初の6段階を均等に進む(fill は text と同じ時間)", () => {
+    // 6段階分(primaryMs=900)を均等割り: 各150ms
+    expect(computeProgress(149, 900, 100).stageIndex).toBe(0);
+    expect(computeProgress(151, 900, 100).stageIndex).toBe(1);
+    expect(computeProgress(301, 900, 100).stageIndex).toBe(2);
+    expect(computeProgress(451, 900, 100).stageIndex).toBe(3);
+    expect(computeProgress(601, 900, 100).stageIndex).toBe(4);
+    expect(computeProgress(751, 900, 100).stageIndex).toBe(5);
+    expect(PROGRESS_STAGES.slice(1, 3)).toEqual(["text", "fill"]);
   });
 
   it("primaryMsを超えたら最後の段階(解析結果まとめ)に入る", () => {
@@ -57,6 +59,6 @@ describe("擬似プログレスバーの段階計算", () => {
   });
 
   it("見積もり0以下でも最後の段階で足踏みする値を返す", () => {
-    expect(computeProgress(0, 0, 0)).toEqual({ ratio: 0.99, stageIndex: 5 });
+    expect(computeProgress(0, 0, 0)).toEqual({ ratio: 0.99, stageIndex: 6 });
   });
 });
