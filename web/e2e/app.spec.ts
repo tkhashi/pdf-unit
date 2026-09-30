@@ -9,6 +9,7 @@ import {
   state,
   text,
   tooltip,
+  type Ui,
   viewportBox,
 } from "./harness";
 
@@ -55,5 +56,38 @@ test("PDFを開いて、凡例・線幅補正・ホバー・選択・ツール�
   );
   expect(ui.cspViolations).toEqual([]);
   expect(ui.errors).toEqual([]);
+  await ui.page.context().close();
+});
+
+const thumbState = (ui: Ui) =>
+  ui.page.evaluate((sel) => {
+    const aside = document.querySelector(sel) as HTMLElement;
+    return [...aside.querySelectorAll("[data-page]")].map((b) => ({
+      loaded: !!b.querySelector("img")?.hasAttribute("src"),
+      page: Number((b as HTMLElement).dataset.page),
+    }));
+  }, ui.sel.thumbs);
+
+test("サムネイルは本体ページの読み込みを待たずに表示範囲だけ表示される", async ({
+  browser,
+}) => {
+  // 本体ページの読み込みを遅らせても、サムネイルはブラウザ内(pdf.js)で描画するため止まらない(ADR 0041)
+  const ui = await openUi(browser, "new", {
+    delay: { "/api/page/lines": 2000 },
+  });
+  await openFile(ui, "multipage.pdf");
+  await ui.page.waitForFunction(
+    (sel) => {
+      const aside = document.querySelector(sel);
+      return !!aside?.querySelector("[data-page] img[src]");
+    },
+    ui.sel.thumbs,
+    { timeout: 5000 }
+  );
+  const thumbs = await thumbState(ui);
+  // 表示範囲(先頭付近)だけが読み込まれ、下の方(表示範囲外)はまだ要求されない
+  expect(thumbs.slice(0, 3).some((t) => t.loaded)).toBe(true);
+  expect(thumbs.slice(-3).every((t) => t.loaded)).toBe(false);
+  expect(ui.cspViolations).toEqual([]);
   await ui.page.context().close();
 });

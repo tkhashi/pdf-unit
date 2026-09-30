@@ -1,8 +1,8 @@
-"""ページ画像・線データ・サムネイルを返すステートレスなFastAPIサーバー。
+"""ページ画像・線データを返すステートレスなFastAPIサーバー。
 
-サーバーはPDFを保存しない。クライアントは開いたPDFから必要なページだけを切り出したPDF
-(1ページ、またはサムネイル用の数ページ)をリクエストボディで送り、サーバーはメモリ上で処理して
-結果を返す(AWS Lambda での実行を想定。ADR 0019, 0020)。
+サーバーはPDFを保存しない。クライアントは開いたPDFから必要な1ページだけを切り出したPDFを
+リクエストボディで送り、サーバーはメモリ上で処理して結果を返す(AWS Lambda での実行を想定。
+ADR 0019, 0020)。サムネイルはブラウザ側(pdf.js)でラスタライズする(ADR 0041)。
 """
 
 from __future__ import annotations
@@ -48,7 +48,6 @@ MAX_DECOMPRESSED_PDF_BYTES = 64 * 1024 * 1024
 MAX_PNG_BASE64_CHARS = int(5.5 * 1024 * 1024)
 _MIN_RESOLUTION = 36
 _MAX_RESOLUTION = 600
-_MAX_THUMBS_PER_REQUEST = 10
 
 app = FastAPI(title="PDF Unit")
 # 応答を gzip で圧縮する(ADR 0024)。線数の多いページの抽出結果は JSON で6MB(Lambda の応答上限)を超えるが、
@@ -63,7 +62,7 @@ app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets", check_dir=Fal
 
 # PDFium(pypdfium2)はスレッドセーフではなく、同時に呼ぶとプロセスごとクラッシュする(SIGSEGV)。
 # FastAPIの同期エンドポイントはスレッドプールで並行実行されるため、PDFiumを使う処理(PDFを開く・図形と文字の
-# 読み取り・ページの描画・埋め込み画像の抽出・サムネイル)は、開いてから閉じるまでをこのロックで直列化する
+# 読み取り・ページの描画・埋め込み画像の抽出)は、開いてから閉じるまでをこのロックで直列化する
 # (ADR 0011, 0038)。Lambda は1つの実行環境で同時に1リクエストしか処理しないので、取り合うのはローカルだけ。
 _pdfium_lock = threading.RLock()
 
@@ -226,32 +225,6 @@ def _render_page(data: bytes, page_no: int, resolution: int) -> tuple[int, str]:
         resolution = max(_MIN_RESOLUTION, min(resolution - 1, shrunk))
 
 
-def _render_thumbnails(data: bytes, width: int) -> list[dict]:
-    """ボディのPDFの各ページ(最大 _MAX_THUMBS_PER_REQUEST)の縮小画像(線検出なし)。大判図面では数dpi相当になるため、
-    dpi指定ではなく出力幅から倍率を決める。"""
-    thumbs = []
-    with _pdfium_locked():
-        try:
-            with stage("open"):
-                pdf = pdfium.PdfDocument(data)
-        except pdfium.PdfiumError as e:
-            raise HTTPException(status_code=400, detail=f"invalid PDF: {e}") from e
-        try:
-            for page_no in range(min(len(pdf), _MAX_THUMBS_PER_REQUEST)):
-                with stage("render"):
-                    page = pdf[page_no]
-                    # get_widthは回転(/Rotate)反映後の表示幅。renderも回転を反映する
-                    image = page.render(scale=width / page.get_width()).to_pil()
-                with stage("png"):
-                    png = _png_bytes(image)
-                with stage("b64"):
-                    thumbs.append({"page": page_no, "png_base64": _b64(png)})
-        finally:
-            pdf.close()
-    metric("thumbs", len(thumbs))
-    return thumbs
-
-
 @app.get("/", response_model=None)
 def index() -> FileResponse | PlainTextResponse:
     page = _STATIC_DIR / "index.html"
@@ -277,16 +250,6 @@ _PAGE = 0
 
 
 # 各APIは所要時間の内訳を Server-Timing、件数などを X-Perf-Metrics ヘッダーで返す(ADR 0023)
-@app.post("/api/thumbs")
-def page_thumbnails(response: Response, width: int = 160, data: bytes = Depends(pdf_body)) -> dict:
-    """ボディのPDFの全ページ(最大10)のサムネイル。page はボディ内でのページ番号。"""
-    width = max(60, min(width, 400))
-    with collect() as timings:
-        thumbs = _render_thumbnails(data, width)
-    _set_timing_headers(response, timings)
-    return {"thumbs": thumbs}
-
-
 @app.post("/api/page/lines")
 def page_lines(response: Response, data: bytes = Depends(pdf_body)) -> dict:
     # 1つの文書で図形・文字・埋め込み画像を読み、線幅補正の描画も行う。すべて PDFium を使うのでロック内

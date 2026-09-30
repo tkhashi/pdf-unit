@@ -3,6 +3,7 @@
 - ステータス: 採用([0001](0001-tech-stack.md) のPDF保存方式と、[0013](0013-page-thumbnails.md) のサムネイルAPI・キャッシュを置き換え。PDF全体の送信と4MBの全体上限は [0020](0020-send-only-needed-pages.md) で変更)
 - 日付: 2026-09-25
 - 追記(2026-09-26): [0038](0038-migrate-to-pypdfium2.md) で pdfplumber を依存から外し、PDF は `pypdfium2.PdfDocument(bytes)` だけで開くようになりました(Lambda の zip は 25.2MB から 13.3MB)。
+- 追記(2026-09-30): [0041](0041-thumbnail-client-side-rendering.md) でサムネイルのラスタライズをブラウザ側(pdf.js)へ移したため、`POST /api/thumbs` は削除しました。
 
 ## コンテキスト
 

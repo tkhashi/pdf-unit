@@ -5,10 +5,12 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 
 // 本番ビルドの index.html に付ける CSP(ADR 0030)。開発サーバーは HMR 用のインラインスクリプトを使うため付けない
+// worker-src はサムネイル描画用の同一オリジン module worker のため(ADR 0041)
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "img-src 'self' data:",
   "connect-src 'self'",
+  "worker-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'none'",
