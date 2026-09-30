@@ -2,7 +2,7 @@
 // (モデル・選択は作成後に書き換えないため、同じオブジェクトなら同じ内容)
 import type { StrokeType } from "../domain/constants";
 import { at } from "../domain/geometry";
-import { type Item, isArea, isImage } from "../domain/items";
+import { type Item, isArea, isFill, isImage } from "../domain/items";
 import type { PageModel } from "../domain/page-model";
 import type { Selection } from "../domain/selection";
 
@@ -15,7 +15,7 @@ export interface StrokeBatch {
 export interface PageResources {
   /** 埋め込み画像の範囲(全画像の四隅を1つにまとめたもの。画像が無ければ null) */
   readonly imageRegions: Path2D | null;
-  /** 線の要素ごとの Path2D(文字・画像は undefined) */
+  /** 線・塗りつぶしの要素ごとの Path2D(文字・画像は undefined) */
   readonly paths: readonly (Path2D | undefined)[];
   /** ベクター描画用バッチ(種類×描画太さごとに1つのPath2D、最初に現れた順) */
   readonly strokeBatches: readonly StrokeBatch[];
@@ -81,7 +81,7 @@ export const preparePageResources = (model: PageModel): PageResources => {
     return existing;
   }
   const paths = model.items.map((it) =>
-    isArea(it) ? undefined : new Path2D(it.d)
+    isArea(it) && !isFill(it) ? undefined : new Path2D(it.d)
   );
   const resources = {
     imageRegions: imageRegionsOf(model.items),

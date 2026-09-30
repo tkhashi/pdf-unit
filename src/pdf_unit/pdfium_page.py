@@ -2,7 +2,7 @@
 
 抽出処理(extract.py・calibration.py)は pdfplumber の Page と同じ形のデータ(`rects`・`curves`・`lines`・`chars`
 の dict と `width`・`height`・`to_image()`)を読む。以前は pdfplumber(pdfminer.six)で作っていたものを、同じ規則で
-PDFium から作る。
+PDFium から作る。ただし線を描かず塗るだけのパスは線として扱わず、塗りつぶし(`fills`)として分ける(ADR 0044)。
 
 座標: ページの表示範囲(CropBox と MediaBox の交わり。PDFium の描画・埋め込み画像の配置と同じ)の左上を原点とし、
 /Rotate を反映した pt。行列の掛け方と上原点への直し方は pdfminer/pdfplumber と同じ式にする。
@@ -102,11 +102,12 @@ class PdfiumPage:
         }.get(self.rotation, (1, 0, 0, 1, -x0, -y0))
         w, h = abs(x1 - x0), abs(y1 - y0)
         self.width, self.height = (h, w) if self.rotation in (90, 270) else (w, h)
-        objects: dict[str, list[dict[str, Any]]] = {"rect": [], "curve": [], "line": []}
+        objects: dict[str, list[dict[str, Any]]] = {"rect": [], "curve": [], "line": [], "fill": []}
         with stage("parse.paths"):
             for obj, forms in self._iter_paths():
                 self._add_path(obj, forms, objects)
         self.rects, self.curves, self.lines = objects["rect"], objects["curve"], objects["line"]
+        self.fills = objects["fill"]
         with stage("parse.chars"):
             self.chars = self._load_chars()
         metric("chars", len(self.chars))
@@ -173,12 +174,38 @@ class PdfiumPage:
         pdfium_c.FPDFPageObj_GetStrokeWidth(obj.raw, w)
         # 描画時の CTM の拡大率を掛けた、実際に描かれる太さ
         linewidth = _decimal(w.value) * (ctm[0] ** 2 + ctm[1] ** 2) ** 0.5
+        fill_mode, stroke = ctypes.c_int(), ctypes.c_int()
+        pdfium_c.FPDFPath_GetDrawMode(obj.raw, fill_mode, stroke)
+        subpaths = [path for path in self._subpaths(obj) if path[0][0] == "m"]
+        if fill_mode.value != pdfium_c.FPDF_FILLMODE_NONE:
+            self._add_fill(subpaths, ctm, linewidth, fill_mode.value, obj, out)
+        # 塗るだけのパスは線を描かないので、線(line/rect/curve)にしない。その線幅は、塗るときに残っていた
+        # 太さで、描かれる線の太さではない(ADR 0044)
+        if not stroke.value and fill_mode.value != pdfium_c.FPDF_FILLMODE_NONE:
+            return
+        color = self._color(pdfium_c.FPDFPageObj_GetStrokeColor, obj)
+        for path in subpaths:
+            self._paint(path, ctm, linewidth, color, out)
+
+    @staticmethod
+    def _color(getter, obj) -> tuple[float, float, float]:
         r, g, b, a = (ctypes.c_uint() for _ in range(4))
-        pdfium_c.FPDFPageObj_GetStrokeColor(obj.raw, r, g, b, a)
-        color = (r.value / 255, g.value / 255, b.value / 255)
-        for path in self._subpaths(obj):
-            if path[0][0] == "m":
-                self._paint(path, ctm, linewidth, color, out)
+        getter(obj.raw, r, g, b, a)
+        return (r.value / 255, g.value / 255, b.value / 255)
+
+    def _add_fill(self, subpaths: list[list[tuple]], ctm: Matrix, linewidth: float, fill_mode: int, obj,
+                  out: dict[str, list[dict[str, Any]]]) -> None:
+        """塗りの範囲を1つにする。塗りの規則はパス全体(全サブパス)に掛かるため、サブパスごとに分けない。"""
+        if not subpaths:
+            return
+        path = [(op[0], *(self._coord(_apply(ctm, p)) for p in op[1:])) for sp in subpaths for op in sp]
+        out["fill"].append({
+            "object_type": "fill",
+            "linewidth": linewidth,
+            "non_stroking_color": self._color(pdfium_c.FPDFPageObj_GetFillColor, obj),
+            "fill_rule": "evenodd" if fill_mode == pdfium_c.FPDF_FILLMODE_ALTERNATE else "nonzero",
+            "path": path,
+        })
 
     def _paint(self, path: list[tuple], ctm: Matrix, linewidth: float, color, out) -> None:
         """1サブパスを line/rect/curve に分ける(pdfminer の PDFLayoutAnalyzer.paint_path と同じ規則)。"""

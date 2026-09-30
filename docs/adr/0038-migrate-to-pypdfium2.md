@@ -2,6 +2,7 @@
 
 - ステータス: 採用([0037](0037-pdfium-migration-research.md) の提案を採用。[0023](0023-performance-measurement.md) の「出力を変えない」の例外。[0011](0011-pdfium-thread-safety.md) のロックの範囲、[0009](0009-cid-character-restoration.md)・[0018](0018-cid-restoration-rotation-and-validation.md) の cid 補完、[0010](0010-embedded-raster-images.md) の座標系の基準を置き換え)
 - 日付: 2026-09-26
+- 追記(2026-10-01): [0044](0044-fill-regions.md) で、塗るだけで線を描かないパスは line/rect/curve にせず、塗りつぶし(fill)として分けるように変えました。線を描くパスの分け方は変えていません。
 
 ## コンテキスト
 

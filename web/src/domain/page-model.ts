@@ -14,7 +14,7 @@ export interface PageModel {
   readonly calibration: CalibrationMethod | null;
   readonly counts: TypeCounts;
   readonly index: SpatialIndex;
-  /** 線(line/rect/curve)・文字(text)・画像(image)の順の通し番号 = 配列の添字 */
+  /** 線(line/rect/curve)・文字(text)・画像(image)・塗りつぶし(fill)の順の通し番号 = 配列の添字 */
   readonly items: readonly Item[];
   /** 報告linewidth→実描画太さの補正係数 */
   readonly lwScale: number;
@@ -66,7 +66,12 @@ export const buildPageModel = (data: LinesResponse): PageModel => {
   const texts = data.texts.map((t, i) => ({ ...t, id: strokes.length + i }));
   const offset = strokes.length + texts.length;
   const images = data.images.map((im, i) => ({ ...im, id: offset + i }));
-  const items: readonly Item[] = [...strokes, ...texts, ...images];
+  // 塗りつぶしは後から加えた種類なので、既存の要素の番号を変えないよう最後に置く
+  const fills = data.fills.map((f, i) => ({
+    ...f,
+    id: offset + images.length + i,
+  }));
+  const items: readonly Item[] = [...strokes, ...texts, ...images, ...fills];
   return {
     calibration: data.calibration,
     counts: countTypes(items),

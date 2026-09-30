@@ -6,7 +6,7 @@ import { pick } from "./spatial-index";
 const none = () => false;
 
 describe("ページのモデル", () => {
-  it("線・文字・画像の順に通し番号を振り、長さと描画太さを求める", () => {
+  it("線・文字・画像・塗りつぶしの順に通し番号を振り、長さと描画太さを求める", () => {
     const m = buildPageModel(sampleLines());
     expect(m.items.map((item) => `${item.id}:${item.type}`)).toEqual([
       "0:line",
@@ -15,8 +15,9 @@ describe("ページのモデル", () => {
       "3:rect",
       "4:text",
       "5:image",
+      "6:fill",
     ]);
-    expect(m.counts).toEqual({ image: 1, line: 3, rect: 1, text: 1 });
+    expect(m.counts).toEqual({ fill: 1, image: 1, line: 3, rect: 1, text: 1 });
     const [first] = m.items;
     expect(first && "length" in first ? first.length : null).toBe(100);
     expect(first && "w" in first ? first.w : null).toBe(0.5);
@@ -41,6 +42,14 @@ describe("ヒット判定", () => {
   it("文字・画像は枠内でも重なる線より後回し", () => {
     expect(pick(m.items, m.index, 120, 46, 1, none)).toBe(4);
     expect(pick(m.items, m.index, 230, 220, 1, none)).toBe(5);
+  });
+
+  it("塗りつぶしは塗りの範囲(穴は除く)と縁の近くで選ぶ", () => {
+    expect(pick(m.items, m.index, 310, 30, 1, none)).toBe(6);
+    expect(pick(m.items, m.index, 365, 50, 1, none)).toBe(6);
+    // 偶奇規則の穴の中央(縁から10pt)は範囲外
+    expect(pick(m.items, m.index, 330, 50, 1, none)).toBe(-1);
+    expect(pick(m.items, m.index, 310, 30, 1, (t) => t === "fill")).toBe(-1);
   });
 
   it("非表示の種類は選ばない。倍率で許容距離が変わる", () => {

@@ -1,4 +1,4 @@
-"""PDFページから線(line/rect/curve)と文字(単語単位)を抽出し、UI描画用の最小レコードにする。
+"""PDFページから線(line/rect/curve)・塗りつぶし(fill)・文字(単語単位)を抽出し、UI描画用の最小レコードにする。
 
 参考: ClassifierArchDrawingByJev の extract.py / render.py。
 入力は PdfiumPage(pdfium_page.py。pdfplumber の Page と同じ形のデータ)。座標は表示範囲の左上原点(pt)で、
@@ -24,6 +24,17 @@ class LineRecord(TypedDict):
     polylines: list[list[float]]  # ヒット判定用の折れ線群 [x0, y0, x1, y1, ...](ベジェは分割済み)
     linewidth: float | None
     color: str | None
+    bbox: tuple[float, float, float, float]  # x0, top, x1, bottom
+
+
+class FillRecord(TypedDict):
+    id: int
+    type: str  # "fill"
+    d: str  # SVG path data(全サブパス。塗りの描画・ハイライト用)
+    polylines: list[list[float]]  # ヒット判定用の閉じた折れ線群(ベジェは分割済み)
+    fill_rule: str  # "nonzero" | "evenodd"(SVG・Canvas の fill-rule と同じ名前)
+    linewidth: float | None  # 塗るときに残っていた線幅(描画時の CTM で換算。線としては描かれない)
+    color: str | None  # 塗りの色
     bbox: tuple[float, float, float, float]  # x0, top, x1, bottom
 
 
@@ -158,6 +169,32 @@ def extract_page_lines(page: PdfiumPage) -> list[LineRecord]:
                     "bbox": (obj["x0"], obj["top"], obj["x1"], obj["bottom"]),
                 }
             )
+    return records
+
+
+def extract_page_fills(page: PdfiumPage) -> list[FillRecord]:
+    """線を描かない塗りだけでなく、線と塗りの両方を行うパスの塗りも含む(ADR 0044)。"""
+    records: list[FillRecord] = []
+    for obj in page.fills:
+        d = _path_from_commands(obj["path"])
+        # 塗りでは開いたサブパスも閉じて塗られるので、折れ線も始点へ戻して閉じる
+        polys = [p if p[0] == p[-1] else [*p, p[0]] for p in _flatten_commands(obj["path"])]
+        if d is None or not polys:
+            continue
+        xs = [x for p in polys for x, _ in p]
+        ys = [y for p in polys for _, y in p]
+        records.append(
+            {
+                "id": len(records),
+                "type": "fill",
+                "d": d,
+                "polylines": [[round(v, 2) for pt in poly for v in pt] for poly in polys],
+                "fill_rule": obj["fill_rule"],
+                "linewidth": obj["linewidth"],
+                "color": _color_to_css(obj["non_stroking_color"]),
+                "bbox": (min(xs), min(ys), max(xs), max(ys)),
+            }
+        )
     return records
 
 

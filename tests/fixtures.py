@@ -105,6 +105,13 @@ FIXTURES: dict[str, dict] = {
         b"q 0 w 10 150 m 190 150 l S Q "
         b"10 160 m 190 160 l S"  # w を指定しない(既定値 1)
     )),
+    "fills": dict(content=(
+        b"20 w q 0.1 0 0 0.1 0 0 cm 100 100 m 900 100 l S Q "  # 線は縮めた座標系で描く(描画時の太さは 2)
+        b"1 0 0 rg 10 20 30 40 re f "  # 塗るだけ(線幅は残っている 20 のまま)
+        b"0 0 1 rg 1 w 100 100 m 150 100 l 150 150 l 100 150 l h "
+        b"110 110 m 140 110 l 140 140 l 110 140 l h f* "  # 偶奇規則。穴のある1つの範囲
+        b"0 1 0 RG 0 1 0 rg 60 120 20 20 re B"  # 線と塗りの両方
+    )),
     "form_q": dict(content=b"q 2 0 0 2 10 10 cm /Fx Do Q 1 w 5 5 m 20 5 l S",
                    form=(_FORM_BODY, (0.5, 0, 0, 0.5, 20, 20))),
     "text_matrix": dict(content=(

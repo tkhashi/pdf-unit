@@ -194,7 +194,7 @@ describe("表示対象と選択", () => {
     const all = run([{ type: "allTypesToggled" }], one);
     expect([...all.visibility.hiddenTypes]).toEqual([]);
     const none = run([{ type: "allTypesToggled" }], all);
-    expect(none.visibility.hiddenTypes.size).toBe(5);
+    expect(none.visibility.hiddenTypes.size).toBe(6);
   });
 
   it("何もない所のクリックで解除、同じホバーは状態を変えない", () => {

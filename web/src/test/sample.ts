@@ -3,6 +3,22 @@ import type { LinesResponse } from "../domain/types";
 
 export const sampleLines = (): LinesResponse => ({
   calibration: "measured",
+  fills: [
+    {
+      bbox: [300, 20, 360, 80],
+      color: "rgb(255,255,255)",
+      // 穴のある範囲(偶奇規則)
+      d: "M300 20 H360 V80 H300 Z M320 40 H340 V60 H320 Z",
+      fill_rule: "evenodd",
+      id: 0,
+      linewidth: 2.5,
+      polylines: [
+        [300, 20, 360, 20, 360, 80, 300, 80, 300, 20],
+        [320, 40, 340, 40, 340, 60, 320, 60, 320, 40],
+      ],
+      type: "fill",
+    },
+  ],
   images: [
     {
       bbox: [200, 200, 260, 240],

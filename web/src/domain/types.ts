@@ -1,4 +1,4 @@
-// /api/page/lines 等の応答の型。サーバー側の定義(extract.py の LineRecord・TextRecord・CharGlyph、
+// /api/page/lines 等の応答の型。サーバー側の定義(extract.py の LineRecord・FillRecord・TextRecord・CharGlyph、
 // raster.py の ImageRecord、server.py の各API)と対応する
 import type { StrokeType } from "./constants";
 
@@ -20,6 +20,22 @@ export interface LineRecord {
   /** ヒット判定用の折れ線群 [x0, y0, x1, y1, ...](ベジェは分割済み) */
   readonly polylines: readonly (readonly number[])[];
   readonly type: StrokeType;
+}
+
+/** 塗りつぶし(パスの塗りの範囲。ADR 0044) */
+export interface FillRecord {
+  readonly bbox: Bbox;
+  /** 塗りの色 */
+  readonly color: string | null;
+  /** SVG path data(全サブパス) */
+  readonly d: string;
+  readonly fill_rule: CanvasFillRule;
+  readonly id: number;
+  /** 塗るときに残っていた線幅(線としては描かれない) */
+  readonly linewidth: number | null;
+  /** ヒット判定用の閉じた折れ線群 [x0, y0, x1, y1, ...](ベジェは分割済み) */
+  readonly polylines: readonly (readonly number[])[];
+  readonly type: "fill";
 }
 
 export interface CharGlyph {
@@ -66,6 +82,7 @@ export type CalibrationMethod =
 
 export interface LinesResponse {
   readonly calibration: CalibrationMethod;
+  readonly fills: readonly FillRecord[];
   readonly images: readonly ImageRecord[];
   readonly lines: readonly LineRecord[];
   readonly linewidth_scale: number;
