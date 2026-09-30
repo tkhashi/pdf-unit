@@ -10,6 +10,10 @@ import {
   pageSizes,
 } from "../services/pdf";
 import { loadThumbsPref, saveThumbsPref } from "../services/prefs";
+import {
+  closeThumbnailSource,
+  openThumbnailSource,
+} from "../services/thumbnail-render";
 import type { ControllerContext, DocumentSession } from "./context";
 import { showPage } from "./page";
 import type { ThumbnailScheduler } from "./thumbnails";
@@ -28,11 +32,15 @@ export const openFile = async (
 ): Promise<void> => {
   const { app } = ctx;
   app.dispatch({ status: plainStatus("読み込み中..."), type: "statusChanged" });
+  const previous = ctx.session();
   let session: DocumentSession;
   try {
-    const pdf = await loadPdf(await file.arrayBuffer());
+    const raw = await file.arrayBuffer();
+    const pdf = await loadPdf(raw);
     const id = nextDocId;
     nextDocId += 1;
+    // 本体ページの表示を待たせないよう、サムネイル用 Worker の初期化は待たずに進める(ADR 0041)
+    const thumbSource = openThumbnailSource(new Uint8Array(raw));
     session = {
       id,
       pageBody: createPageBodyCache(
@@ -40,10 +48,16 @@ export const openFile = async (
         PAGE_PDF_CACHE
       ),
       pdf,
+      thumbSource,
     };
   } catch (e) {
     app.dispatch({ status: plainStatus(loadError(e)), type: "statusChanged" });
     return;
+  }
+  if (previous) {
+    previous.thumbSource.then(closeThumbnailSource, () => {
+      // 開けなかった文書は閉じる必要がない
+    });
   }
   ctx.setSession(session);
   thumbs.reset(session);

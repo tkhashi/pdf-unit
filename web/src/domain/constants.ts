@@ -55,10 +55,8 @@ export const WHEEL_ZOOM_RATE = 0.0015;
 export const MAX_SEND_BYTES = 4 * 1024 * 1024;
 /** 切り出した1ページPDFを使い回す件数(同じページの線データ・原本画像・埋め込み画像で共用) */
 export const PAGE_PDF_CACHE = 6;
-/** サムネイルは10ページ単位のバッチで要求する(1回のPOSTでPDFを送る回数を減らすため) */
+/** サムネイルの描画幅(ブラウザ内、pdf.js でラスタライズ。ADR 0041) */
 export const THUMB_WIDTH = 140;
 export const THUMB_MAX_WIDTH = 400;
-export const THUMB_BATCH = 10;
-export const THUMB_CONCURRENCY = 1;
 export const TIP_DELAY_MS = 250;
 export const DEFAULT_RASTER_OPACITY = 20;

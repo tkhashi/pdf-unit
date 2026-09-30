@@ -24,6 +24,9 @@ import {
 
 test.skip(!process.env.PARITY, "PARITY=1 のときだけ実行する");
 
+// サムネイルのバッチ切り出しログ(旧UIのみ。「切り出し pN-N」の形。ADR 0041)を検出する
+const THUMB_EXTRACT_LOG = /^\[perf\] 切り出し p\d+-\d+ /;
+
 test.beforeAll(async () => {
   await generateFixtures();
 });
@@ -126,11 +129,18 @@ test("文書を開いた直後の表示・通信・計測ログが一致する",
     p,
     async (ui) =>
       ui.apiCalls
-        // 新UIは埋め込み画像の画像データを要求しない(ADR 0039)。旧UIの要求はサーバーが 404 を返す(ADR 0040)
-        .filter((c) => !c.path.startsWith("/api/page/images"))
+        // 新UIは埋め込み画像の画像データを要求しない(ADR 0039)。旧UIの要求はサーバーが 404 を返す(ADR 0040)。
+        // サムネイルは新UIがブラウザ内(pdf.js)で描画するため、旧UIだけがサーバーへ要求する(ADR 0041)
+        .filter(
+          (c) =>
+            !(
+              c.path.startsWith("/api/page/images") ||
+              c.path.startsWith("/api/thumbs")
+            )
+        )
         .map((c) => `${c.path} ${c.sha256}`)
         .sort(),
-    "API 呼び出し(パスと送ったPDFのSHA-256。埋め込み画像の画像データを除く)"
+    "API 呼び出し(パスと送ったPDFのSHA-256。埋め込み画像の画像データ・サムネイルを除く)"
   );
   await same(
     p,
@@ -140,7 +150,10 @@ test("文書を開いた直後の表示・通信・計測ログが一致する",
   );
   await same(
     p,
-    async (ui) => perfPattern(ui.consoleDebug).sort(),
+    async (ui) =>
+      perfPattern(
+        ui.consoleDebug.filter((l) => !THUMB_EXTRACT_LOG.test(l))
+      ).sort(),
     "console.debug の計測ログ"
   );
   await sameCanvases(p, "開いた直後");
@@ -400,27 +413,17 @@ test("複数ページ: サムネイルの取得・ページ切替・一覧の開
 }) => {
   const p = await openPair(browser);
   await load(p, "multipage.pdf");
+  // サムネイルの取得元・タイミングが旧UI(サーバー API、本体表示後)と新UI(ブラウザ内 pdf.js、
+  // 即時)とで異なるため(ADR 0041)、読み込み済みかどうか(loaded)は比較せず、一覧の開閉状態と
+  // ページ数(tips の件数)だけを見る
   const thumbState = (ui: Ui) =>
     ui.page.evaluate((sel) => {
       const aside = document.querySelector(sel) as HTMLElement;
       return {
+        count: aside.querySelectorAll("[data-page]").length,
         hidden: aside.hidden,
-        loaded: [...aside.querySelectorAll("img")].map((i) =>
-          i.hasAttribute("src")
-        ),
-        tips: [...aside.querySelectorAll("[data-page]")].map((b) =>
-          b.getAttribute("data-tip")
-        ),
       };
     }, ui.sel.thumbs);
-  await same(p, thumbState, "開いた直後のサムネイル");
-  const thumbCalls = (ui: Ui) =>
-    Promise.resolve(
-      ui.apiCalls
-        .filter((c) => c.path.startsWith("/api/thumbs"))
-        .map((c) => `${c.path} ${c.sha256}`)
-    );
-  await same(p, thumbCalls, "サムネイルの要求");
   for (const page of [3, 12, 24, 0]) {
     await switchPage(p, page);
     await same(p, (ui) => text(ui, "pageInfo"), `${page + 1}ページ目の表示`);
@@ -428,8 +431,8 @@ test("複数ページ: サムネイルの取得・ページ切替・一覧の開
     await same(p, thumbState, `${page + 1}ページ目のサムネイル`);
     await sameCanvases(p, `${page + 1}ページ目`);
   }
-  await same(p, thumbCalls, "スクロール後のサムネイルの要求");
-  await same(p, async (ui) => ui.maxThumbsInFlight, "サムネイルの同時要求数");
+  // サムネイルの取得元が旧UI(サーバー API)と新UI(ブラウザ内 pdf.js)で異なるため(ADR 0041)、
+  // 通信内容・同時要求数の比較は行わず、見た目(thumbState)の一致だけを見る
   // 一覧を閉じる・開く(表示の大きさは変わるが全体表示には戻さない)
   for (const ui of p.both) {
     await ui.page
@@ -628,13 +631,12 @@ test("高DPI(devicePixelRatio 2)の描画と原本画像の解像度が一致す
     }
     await sameCanvases(p, "DPR 2 の選択");
   }
+  // サムネイル(width=)は新UIがブラウザ内(pdf.js)で描画するため対象外(ADR 0041)。原本画像の解像度だけ見る
   await same(
     p,
     async (ui) =>
       ui.apiCalls
-        .filter(
-          (c) => c.path.includes("width=") || c.path.includes("resolution=")
-        )
+        .filter((c) => c.path.includes("resolution="))
         .map((c) => c.path),
     "DPR に応じた要求"
   );

@@ -1,18 +1,10 @@
-// サムネイル一覧: 表示範囲に入ったページを含む10ページ単位のバッチで、1バッチずつ、
-// 本体ページの読み込みが終わってから取得する(サーバー側はPDFium処理が直列)
-import {
-  MAX_SEND_BYTES,
-  THUMB_BATCH,
-  THUMB_CONCURRENCY,
-  THUMB_MAX_WIDTH,
-  THUMB_WIDTH,
-} from "../domain/constants";
-import { pngDataUrl } from "../domain/format";
+// サムネイル一覧: ブラウザ内(pdf.js の専用 Worker)でラスタライズする(ADR 0041)。
+// サーバーへの通信が無くなったため、本体ページの読み込み完了を待たずに、表示範囲に入った
+// ページから順に IntersectionObserver で検知して要求する
+import { THUMB_MAX_WIDTH, THUMB_WIDTH } from "../domain/constants";
 import { thumbUnavailableTip } from "../domain/messages";
-import type { ThumbsResponse } from "../domain/types";
 import { devicePixelRatio } from "../render/dom";
-import { apiPost } from "../services/api";
-import { extractPages } from "../services/pdf";
+import { renderThumb } from "../services/thumbnail-render";
 import type { ControllerContext, DocumentSession } from "./context";
 
 export interface ThumbnailScheduler {
@@ -25,13 +17,12 @@ export interface ThumbnailScheduler {
 
 // 要求の進み具合は画面に出さない内部の記録なので store に置かず、文書ごとにここで持つ
 interface Tracking {
-  active: number;
   readonly elements: Map<number, HTMLElement>;
   readonly observer: IntersectionObserver | null;
-  /** 要求済み(読込中・読込済み)のバッチ番号 */
+  /** 要求済み(描画中・描画済み・失敗確定)のページ */
   readonly requested: Set<number>;
   readonly session: DocumentSession | null;
-  /** 表示範囲内でまだ読み込んでいないページ */
+  /** 表示範囲内でまだ要求していないページ */
   readonly visible: Set<number>;
 }
 
@@ -43,7 +34,6 @@ export const createThumbnailScheduler = (
 ): ThumbnailScheduler => {
   const { app } = ctx;
   let t: Tracking = {
-    active: 0,
     elements: new Map(),
     observer: null,
     requested: new Set(),
@@ -51,73 +41,42 @@ export const createThumbnailScheduler = (
     visible: new Set(),
   };
 
-  // 指定ページを1つのPDFに切り出して送る。送信上限を超える場合は半分ずつに分けて送り直し、
-  // 1ページでも超える場合はそのサムネイルを「表示できません」にする
-  const loadThumbs = async (
-    target: DocumentSession,
-    indices: readonly number[],
-    width: number
-  ): Promise<void> => {
-    const body = await extractPages(target.pdf, indices);
-    if (body.bytes.length > MAX_SEND_BYTES) {
-      const [first] = indices;
-      if (indices.length === 1 && first !== undefined) {
-        app.dispatch({
-          docId: target.id,
-          page: first,
-          tip: thumbUnavailableTip(first, body.bytes.length),
-          type: "thumbUnavailable",
-        });
-        return;
-      }
-      const half = Math.ceil(indices.length / 2);
-      await loadThumbs(target, indices.slice(0, half), width);
-      await loadThumbs(target, indices.slice(half), width);
-      return;
-    }
-    const r = await apiPost<ThumbsResponse>(`/api/thumbs?width=${width}`, body);
-    // t.page は送ったPDF内でのページ番号
-    const thumbs = r.thumbs.flatMap((th) => {
-      const page = indices[th.page];
-      return page === undefined
-        ? []
-        : [{ page, src: pngDataUrl(th.png_base64) }];
-    });
-    app.dispatch({ docId: target.id, thumbs, type: "thumbsLoaded" });
-  };
-
-  const loadBatch = async (
+  const loadOne = async (
     tracking: Tracking,
     target: DocumentSession,
-    batch: number,
+    page: number,
     width: number
   ): Promise<void> => {
-    const start = batch * THUMB_BATCH;
-    const count = Math.min(THUMB_BATCH, target.pdf.getPageCount() - start);
-    const indices = Array.from({ length: count }, (_, i) => start + i);
-    tracking.active += 1;
     try {
-      await loadThumbs(target, indices, width);
+      const source = await target.thumbSource;
+      const src = await renderThumb(source, page, width);
       if (tracking !== t) {
         return;
       }
-      // 監視は読み込み成功時に解除する(失敗したバッチは、再び表示範囲に入ったとき再要求される)
-      for (const i of indices) {
-        tracking.visible.delete(i);
-        const el = tracking.elements.get(i);
-        if (el) {
-          tracking.observer?.unobserve(el);
-        }
+      // 監視は要求が確定したときに解除する(成功・失敗のいずれも読み込みをやり直さない)
+      const el = tracking.elements.get(page);
+      if (el) {
+        tracking.observer?.unobserve(el);
       }
+      app.dispatch({
+        docId: target.id,
+        thumbs: [{ page, src }],
+        type: "thumbsLoaded",
+      });
     } catch {
-      if (tracking === t) {
-        tracking.requested.delete(batch); // 失敗したバッチは次に見えたとき再要求する
+      if (tracking !== t) {
+        return;
       }
-    } finally {
-      if (tracking === t) {
-        tracking.active -= 1;
-        pump();
+      const el = tracking.elements.get(page);
+      if (el) {
+        tracking.observer?.unobserve(el);
       }
+      app.dispatch({
+        docId: target.id,
+        page,
+        tip: thumbUnavailableTip(page),
+        type: "thumbUnavailable",
+      });
     }
   };
 
@@ -132,16 +91,12 @@ export const createThumbnailScheduler = (
       Math.round(THUMB_WIDTH * devicePixelRatio())
     );
     for (const page of tracking.visible) {
-      if (app.getState().page.loading || tracking.active >= THUMB_CONCURRENCY) {
-        return;
-      }
       tracking.visible.delete(page);
-      const batch = Math.floor(page / THUMB_BATCH);
-      if (tracking.requested.has(batch)) {
-        continue; // 同じバッチを重複して要求しない
+      if (tracking.requested.has(page)) {
+        continue; // 同じページを重複して要求しない
       }
-      tracking.requested.add(batch);
-      loadBatch(tracking, target, batch, width);
+      tracking.requested.add(page);
+      loadOne(tracking, target, page, width);
     }
   };
 
@@ -165,7 +120,6 @@ export const createThumbnailScheduler = (
         )
       : null;
     t = {
-      active: 0,
       elements: new Map(),
       observer,
       requested: new Set(),
@@ -186,16 +140,8 @@ export const createThumbnailScheduler = (
     }
   };
 
-  // 本体ページの線データの取得が終わったら、控えていたサムネイルの要求を始める
-  const unsubscribe = app.subscribe((s, p) => {
-    if (p.page.loading && !s.page.loading) {
-      pump();
-    }
-  });
-
   return {
     dispose: () => {
-      unsubscribe();
       t.observer?.disconnect();
     },
     register,

@@ -1,6 +1,6 @@
 """PDFのページごとにAPIの所要時間・内訳・応答サイズ・ピークメモリを計測する(ADR 0023)。
 
-    uv run python scripts/profile_pages.py <PDF> [--pages 1-5,10] [--endpoints lines,image,thumbs]
+    uv run python scripts/profile_pages.py <PDF> [--pages 1-5,10] [--endpoints lines,image]
         [--resolutions 100,200,400] [--out result.jsonl] [--dump DIR] [--cprofile DIR]
 
 - ページの切り出しは UI と同じく pdf-lib(web/ の依存。Node.js)で行う(copyPages、useObjectStreams: false)。
@@ -37,10 +37,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # UI と同じ pdf-lib(web/ の依存。pnpm --dir web install で入る)
 PDF_LIB = ROOT / "web" / "node_modules" / "pdf-lib" / "dist" / "pdf-lib.min.js"
-# UI と同じ値(web/src/domain/constants.ts の RESOLUTIONS・THUMB_BATCH・サムネイル幅(140px × devicePixelRatio 2))
+# UI と同じ値(web/src/domain/constants.ts の RESOLUTIONS)
 DEFAULT_RESOLUTIONS = "100,200,400"
-THUMB_BATCH = 10
-THUMB_WIDTH = 280
 MAX_SEND_BYTES = 4 * 1024 * 1024
 
 # UI の extractPages と同じ処理で、指定ページだけを含むPDFを書き出す
@@ -126,7 +124,6 @@ def _run_child(job: dict) -> dict:
         call = {
             "lines": lambda: server.page_lines(response=Response(), data=data),
             "image": lambda: server.page_image(response=Response(), resolution=job["resolution"], data=data),
-            "thumbs": lambda: server.page_thumbnails(response=Response(), width=THUMB_WIDTH, data=data),
         }[job["kind"]]
         profiler = cProfile.Profile()
         start = time.perf_counter()
@@ -139,7 +136,6 @@ def _run_child(job: dict) -> dict:
     path, query = {
         "lines": ("/api/page/lines", ""),
         "image": ("/api/page/image", f"resolution={job.get('resolution')}"),
-        "thumbs": ("/api/thumbs", f"width={THUMB_WIDTH}"),
     }[job["kind"]]
     log = io.StringIO()  # ミドルウェアの計測ログは捨てる(同じ値をヘッダーから取る)
     start = time.perf_counter()
@@ -259,11 +255,10 @@ def _summarize(results: list[dict]) -> None:
         peak = max(ok, key=lambda r: r["maxrss_mb"])
         print(f"ピークメモリの最大: {peak['maxrss_mb']:.0f}MB (p{peak['page'] + 1} {_label(peak)}、"
               f"起動直後 {peak['maxrss_base_mb']:.0f}MB、Lambda は2048MB)")
-    over = sorted({(r["page"] + 1, r["kind"] == "thumbs") for r in results if r.get("over_limit")})
+    over = sorted({r["page"] + 1 for r in results if r.get("over_limit")})
     if over:
-        # thumbs は10ページ単位のバッチ(UI は半分ずつに分けて送り直す)。それ以外は1ページ(UI では処理できない)
-        print("送信上限(4MB)を超える切り出し: "
-              + ", ".join(f"p{p}〜のサムネイル" if thumbs else f"p{p}" for p, thumbs in over))
+        # 1ページ分がこの大きさを超えると UI では処理できない
+        print("送信上限(4MB)を超える切り出し: " + ", ".join(f"p{p}" for p in over))
     for r in failed:
         print(f"HTTP {r['status']}: p{r['page'] + 1} {_label(r)}(集計から除外)")
     for r in errors:
@@ -278,7 +273,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pdf", type=Path)
     parser.add_argument("--pages", help="1始まりのページ番号(例: 1-5,10)。省略時は全ページ")
-    parser.add_argument("--endpoints", default="lines,image,thumbs")
+    parser.add_argument("--endpoints", default="lines,image")
     parser.add_argument("--resolutions", default=DEFAULT_RESOLUTIONS, help="原本画像の解像度(dpi)")
     parser.add_argument("--splitter", choices=["auto", "pdflib", "pdfium"], default="auto")
     parser.add_argument("--out", type=Path, help="結果の JSONL")
@@ -299,11 +294,6 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         split_jobs = [{"out": f"{tmp}/p{p}.pdf", "indices": [p]} for p in pages]
-        batches = sorted({p // THUMB_BATCH for p in pages}) if "thumbs" in endpoints else []
-        split_jobs += [
-            {"out": f"{tmp}/t{b}.pdf", "indices": list(range(b * THUMB_BATCH, min((b + 1) * THUMB_BATCH, count)))}
-            for b in batches
-        ]
         splitter = _split(args.pdf, split_jobs, args.splitter)
         print(f"{args.pdf.name}: {count}ページ中 {len(pages)}ページを計測(切り出し: {splitter})", file=sys.stderr)
 
@@ -337,8 +327,6 @@ def main() -> None:
                 if "image" in endpoints:
                     for res in resolutions:
                         run(job("image", p, pdf, resolution=res))
-            for b in batches:
-                run(job("thumbs", b * THUMB_BATCH, f"{tmp}/t{b}.pdf"))
         finally:
             if out:
                 out.close()

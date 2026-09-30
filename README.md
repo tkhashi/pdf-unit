@@ -179,20 +179,19 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 - **埋め込み画像**:
   - Form XObject 内の画像も含めて抽出します。PDF 内で1枚の絵が複数の画像(帯状など)に分けて保存されている場合は、分かれたまま1つずつ扱います
   - 画像データは取得せず、`/api/page/lines` が返す配置範囲(四隅)に枠を描きます。枠の中は、原本画像の濃さの設定によらず原本画像を不透明で表示するので、絵柄はそのまま見えます([ADR 0039](docs/adr/0039-embedded-images-as-outlines.md))
-- **サムネイル**: 線検出を行わず、PDFium で元PDFを出力幅160px前後に縮小描画したものです。一覧の表示範囲に入ったページを含む10ページ単位のバッチで、1バッチずつ、本体ページの読み込みが終わってから取得します(同じバッチは重複して要求しません)。バッチを切り出したPDFが送信上限を超える場合は半分ずつに分けて送り、1ページでも超える場合はそのサムネイルを斜線の「表示できません」表示にします
+- **サムネイル**: 線検出を行わず、ブラウザ内([pdf.js](https://mozilla.github.io/pdf.js/)、専用の Web Worker)で元PDFを出力幅140px前後に縮小描画したものです([ADR 0041](docs/adr/0041-thumbnail-client-side-rendering.md))。サーバーへは送らず、`IntersectionObserver` で一覧の表示範囲に入ったページだけを描画します(同じページを重複して要求しません)。本体ページの読み込みは待ちません。描画に失敗したページは「表示できません」表示にします
 
 ## API
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
 | GET | `/` | UI(ビルドした `static/index.html`。未ビルドなら 503) |
-| POST | `/api/thumbs?width=` | サムネイル。ボディのPDFの全ページ(最大10)、幅60〜400px。`{thumbs: [{page, png_base64}]}`(`page` は送ったPDF内でのページ番号) |
 | POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, texts, images}` |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
 | GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
 | GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
 
-サーバーはステートレスで、PDFを保存せず、キャッシュも持ちません。`GET` 以外のAPIはすべて POST で、リクエストボディにPDFの生バイト列(`Content-Type: application/pdf`)を送ります。UIは開いたPDFをブラウザ上に保持し、[pdf-lib](https://github.com/Hopding/pdf-lib) で**必要なページだけを切り出したPDF**(`/api/page/*` は1ページ、`/api/thumbs` は最大10ページ)を送ります。`/api/page/*` のサーバーは送られたPDFの先頭ページを処理します(ADR 0019, 0020)。ページの寸法(一覧の枠・図面の枠)は UI が pdf-lib で求め、`/api/page/lines` の `page` で答え合わせします。
+サーバーはステートレスで、PDFを保存せず、キャッシュも持ちません。`GET` 以外のAPIはすべて POST で、リクエストボディにPDFの生バイト列(`Content-Type: application/pdf`)を送ります。UIは開いたPDFをブラウザ上に保持し、[pdf-lib](https://github.com/Hopding/pdf-lib) で**必要な1ページだけを切り出したPDF**を送ります。サーバーは送られたPDFの先頭ページを処理します(ADR 0019, 0020)。ページの寸法(一覧の枠・図面の枠)は UI が pdf-lib で求め、`/api/page/lines` の `page` で答え合わせします。サムネイルはサーバーへ送らず、ブラウザ内(pdf.js)で描画します(ADR 0041)。
 
 - ボディのSHA-256(16進)を `x-amz-content-sha256` ヘッダーに付けます。CloudFront の OAC 経由で Lambda 関数URLへ POST する場合に必須です(ローカルのサーバーは検証しません)。UIは切り出したPDFごとに計算し、1ページ分の切り出し結果は直近6ページ分を使い回します
 - 1回に送るPDF(切り出したページ)の上限は 4MB(4 × 1024 × 1024 バイト)です。PDF全体の大きさには上限がありません。UIは超過するページを送らずにエラーを表示し、サーバーは超過時に 413 を返します。ボディが `%PDF` で始まらない場合は 400 を返します
@@ -209,7 +208,7 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 
 - **`Server-Timing` / `X-Perf-Metrics` ヘッダー**: 区間の所要時間(ミリ秒)と件数です。区間名の `.` は内訳を表し(`calib.render` は `calib` の内訳)、`.` を含まない区間の合計がその API の処理時間の目安になります。`lock_wait` は PDFium のロック待ちの時間です
   - `/api/page/lines`: `open`(PDFを開く)・`parse`(PDFium による図形・文字の読み取り。内訳 `parse.paths`・`parse.chars`)・`vectors`(線のレコード作成)・`calib`(線幅補正。内訳 `calib.select`・`calib.render`・`calib.measure`)・`texts`(文字。内訳 `texts.unreadable`・`texts.words`・`texts.fonts`・`texts.records`)・`images`(埋め込み画像の配置。内訳 `images.decode`)。すべて PDFium のロック内で処理します
-  - `/api/page/image`・`/api/thumbs`: `open`・`render`・`png`・`b64`
+  - `/api/page/image`: `open`・`render`・`png`・`b64`
 - **サーバーのログ**: API リクエストごとに1行の JSON を標準出力に書きます。項目は `perf`(パス)・`query`・`status`・`cold`(プロセス最初のリクエストか)・`total_ms`(ボディ受信・JSON 直列化を含む全体)・`req_bytes`・`resp_bytes`(圧縮後の転送される大きさ)・`stages_ms`・`metrics`・`maxrss_mb`(プロセス開始以来の最大メモリ)・`rss_mb`(現在のメモリ。Linux のみ)です。Lambda では CloudWatch Logs Insights で集計できます
 - **ブラウザのコンソール**: `console.debug`(DevTools の Console で Verbose を有効にすると表示)に、API 呼び出しごとの所要時間・送受信サイズ・`Server-Timing`、ページ切り出しの時間、ページ切替からの経過(線データ受信・描画準備完了・初回描画完了・原本画像表示)を出します
 - **`scripts/profile_pages.py`**: PDF のページごとに各 API を計測し、呼び出しごと・区間ごとの集計、応答サイズとピークメモリの最大を表示します。ブラウザと同じく `Accept-Encoding: gzip` を付けて送り、応答の大きさは展開後(`resp_bytes`)・転送される大きさ(`wire_bytes`)・Lambda の上限と比べる大きさの推定(`lambda_bytes`。圧縮した応答は Lambda Web Adapter が base64 化するため4/3倍)を記録します
@@ -222,7 +221,7 @@ uv run python scripts/profile_pages.py 図面.pdf --pages 3 --cprofile prof   # 
 
 - 1回の API 呼び出しごとに子プロセスを起動し、ASGI アプリに直接 POST します(Depends・JSON 直列化・ミドルウェアを含む実際の経路)。子プロセスの最大メモリを、その呼び出しのピークメモリとみなします
 - ページの切り出しは UI と同じ pdf-lib(`web/node_modules/pdf-lib`。`pnpm --dir web install` で入ります)を Node.js で動かして行います。Node.js か pdf-lib が無い場合は pypdfium2 で切り出しますが、UI が送るバイト列とは異なるため、計測値の比較には注意してください
-- 計測する API は `--endpoints`(既定 `lines,image,thumbs`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)で指定します
+- 計測する API は `--endpoints`(既定 `lines,image`)、原本画像の解像度は `--resolutions`(既定 `100,200,400`、UI と同じ)で指定します
 - 手元(Apple Silicon)の計測値は Lambda(arm64、2048MB で約1.2 vCPU 相当)より速く出ます。区間の比率や、画素数・件数に対する伸び方を見る用途に使ってください
 
 ### 変更前後の応答の比較
@@ -252,7 +251,8 @@ web/               UI(React + TypeScript、pnpm・Vite・Biome/ultracite・Tailw
   src/state/       状態(Zustand の store と純粋関数の reducer)
   src/controllers/ 非同期処理と入力(文書・ページ・原本画像・サムネイル・表示領域の操作・ツールチップ)
   src/render/      Canvas の描画(store を購読して1フレームに1回描く)
-  src/services/    API 呼び出し・pdf-lib(ページの切り出し)・計測ログ・表示設定の保存
+  src/services/    API 呼び出し・pdf-lib(ページの切り出し)・サムネイル描画(pdf.js の Worker ラッパー)・計測ログ・表示設定の保存
+  src/workers/     サムネイルのラスタライズ(pdf.js を動かす専用 Web Worker。ADR 0041)
   src/containers/  store を購読して components へ props を渡す
   src/components/  props だけを受け取る表示部品
   e2e/             Playwright(合成PDFの生成、新UIの基本動作、旧UIとの並走比較)

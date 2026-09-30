@@ -31,6 +31,7 @@ const TYPES: Record<string, string> = {
   ".css": "text/css",
   ".html": "text/html",
   ".js": "text/javascript",
+  ".mjs": "text/javascript",
 };
 
 const newFile = (path: string): { body: Buffer; type: string } | null => {
@@ -55,7 +56,6 @@ export interface Ui {
   readonly errors: string[];
   inFlight: number;
   readonly kind: Kind;
-  maxThumbsInFlight: number;
   readonly page: Page;
   readonly sel: Readonly<Record<SelKey, string>>;
 }
@@ -121,11 +121,9 @@ export const openUi = async (
     errors: [],
     inFlight: 0,
     kind,
-    maxThumbsInFlight: 0,
     page,
     sel: SELECTORS[kind],
   };
-  let thumbsInFlight = 0;
   page.on("console", (m) => {
     if (m.type() === "debug") {
       ui.consoleDebug.push(m.text());
@@ -146,16 +144,11 @@ export const openUi = async (
     const url = new URL(route.request().url());
     if (url.pathname.startsWith("/api/")) {
       const path = url.pathname + url.search;
-      const isThumbs = url.pathname === "/api/thumbs";
       ui.apiCalls.push({
         path,
         sha256: route.request().headers()["x-amz-content-sha256"] ?? "",
       });
       ui.inFlight += 1;
-      if (isThumbs) {
-        thumbsInFlight += 1;
-        ui.maxThumbsInFlight = Math.max(ui.maxThumbsInFlight, thumbsInFlight);
-      }
       try {
         const wait = Object.entries(opts.delay ?? {}).find(([k]) =>
           path.includes(k)
@@ -167,9 +160,6 @@ export const openUi = async (
         await route.fulfill({ response });
       } finally {
         ui.inFlight -= 1;
-        if (isThumbs) {
-          thumbsInFlight -= 1;
-        }
       }
       return;
     }

@@ -77,10 +77,3 @@ export interface PageImageResponse {
   readonly png_base64: string;
   readonly resolution: number;
 }
-
-export interface ThumbsResponse {
-  readonly thumbs: readonly {
-    readonly page: number;
-    readonly png_base64: string;
-  }[];
-}
