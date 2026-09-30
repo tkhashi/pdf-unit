@@ -78,7 +78,7 @@ const pageLoadSettled: Handler<"pageLoadSettled"> = (s, a) =>
     ? { ...s, page: { ...s.page, loading: false } }
     : s;
 
-// 座標系の基準はサーバー(pdfplumber)の寸法。pdf-libで求めた寸法と食い違えば合わせる
+// 座標系の基準はサーバー(PDFium)の寸法。pdf-libで求めた寸法と食い違えば合わせる
 const pageSizeReported: Handler<"pageSizeReported"> = (s, a) => {
   if (a.request !== s.page.request) {
     return s;

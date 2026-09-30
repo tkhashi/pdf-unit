@@ -20,7 +20,7 @@ export interface DocState {
 export interface PageState {
   /** 表示中のページ(0始まり) */
   readonly index: number;
-  /** 本体ページの線データを取得中(その間はサムネイルの要求を控える) */
+  /** 本体ページの線データを取得中 */
   readonly loading: boolean;
   readonly model: PageModel;
   /** ページ連続切替時に、古いページの応答で上書きしないための通し番号 */

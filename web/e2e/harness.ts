@@ -31,6 +31,7 @@ const TYPES: Record<string, string> = {
   ".css": "text/css",
   ".html": "text/html",
   ".js": "text/javascript",
+  ".mjs": "text/javascript",
 };
 
 const newFile = (path: string): { body: Buffer; type: string } | null => {
@@ -55,7 +56,6 @@ export interface Ui {
   readonly errors: string[];
   inFlight: number;
   readonly kind: Kind;
-  maxThumbsInFlight: number;
   readonly page: Page;
   readonly sel: Readonly<Record<SelKey, string>>;
 }
@@ -121,11 +121,9 @@ export const openUi = async (
     errors: [],
     inFlight: 0,
     kind,
-    maxThumbsInFlight: 0,
     page,
     sel: SELECTORS[kind],
   };
-  let thumbsInFlight = 0;
   page.on("console", (m) => {
     if (m.type() === "debug") {
       ui.consoleDebug.push(m.text());
@@ -146,16 +144,11 @@ export const openUi = async (
     const url = new URL(route.request().url());
     if (url.pathname.startsWith("/api/")) {
       const path = url.pathname + url.search;
-      const isThumbs = url.pathname === "/api/thumbs";
       ui.apiCalls.push({
         path,
         sha256: route.request().headers()["x-amz-content-sha256"] ?? "",
       });
       ui.inFlight += 1;
-      if (isThumbs) {
-        thumbsInFlight += 1;
-        ui.maxThumbsInFlight = Math.max(ui.maxThumbsInFlight, thumbsInFlight);
-      }
       try {
         const wait = Object.entries(opts.delay ?? {}).find(([k]) =>
           path.includes(k)
@@ -167,9 +160,6 @@ export const openUi = async (
         await route.fulfill({ response });
       } finally {
         ui.inFlight -= 1;
-        if (isThumbs) {
-          thumbsInFlight -= 1;
-        }
       }
       return;
     }
@@ -311,7 +301,9 @@ interface NewHook {
         getState: () => {
           hovered: number;
           originalImage: { receivedRes: number; requestedRes: number };
-          page: { model: { items: unknown[] } };
+          page: {
+            model: { items: { bbox?: number[]; type: string }[] };
+          };
           selection: {
             anchor: number;
             level: number;
@@ -368,10 +360,40 @@ export const canvasData = (ui: Ui, key: "scene" | "highlight") =>
     ui.sel[key]
   );
 
-/** 2つの dataURL の画素の差の数(同じ大きさの前提) */
-export const pixelDiff = (ui: Ui, a: string, b: string): Promise<number> =>
+/**
+ * 新UIの埋め込み画像の範囲(Canvas の画素座標の矩形 [x0, y0, x1, y1])。新UIは画像を枠と原本画像で描き、
+ * 旧UIは画像データを描くため、画素の比較から外す(ADR 0039)。枠・ハイライトの線幅ぶん広げる
+ */
+export const imageMasks = (ui: Ui): Promise<number[][]> =>
+  ui.page.evaluate(() => {
+    const s = (
+      window as unknown as NewHook
+    ).__pdfUnit.controller.app.getState();
+    const dpr = window.devicePixelRatio || 1;
+    const margin = 12;
+    const { scale, x, y } = s.view;
+    return s.page.model.items
+      .filter((it) => it.type === "image" && it.bbox)
+      .map((it) => {
+        const [x0, top, x1, bottom] = it.bbox as number[];
+        return [
+          (x + (x0 as number) * scale - margin) * dpr,
+          (y + (top as number) * scale - margin) * dpr,
+          (x + (x1 as number) * scale + margin) * dpr,
+          (y + (bottom as number) * scale + margin) * dpr,
+        ];
+      });
+  });
+
+/** 2つの dataURL の画素の差の数(同じ大きさの前提)。masks の矩形の中は数えない */
+export const pixelDiff = (
+  ui: Ui,
+  a: string,
+  b: string,
+  masks: readonly number[][] = []
+): Promise<number> =>
   ui.page.evaluate(
-    async ([x, y]) => {
+    async ([x, y, rects]) => {
       const load = async (src: string) => {
         const img = new Image();
         img.src = src;
@@ -381,26 +403,40 @@ export const pixelDiff = (ui: Ui, a: string, b: string): Promise<number> =>
         c.height = img.naturalHeight;
         const ctx = c.getContext("2d") as CanvasRenderingContext2D;
         ctx.drawImage(img, 0, 0);
-        return ctx.getImageData(0, 0, c.width, c.height).data;
+        return {
+          data: ctx.getImageData(0, 0, c.width, c.height).data,
+          width: c.width,
+        };
       };
       const [p, q] = await Promise.all([load(x), load(y)]);
-      if (p.length !== q.length) {
+      if (p.data.length !== q.data.length) {
         return -1;
       }
+      const masked = (px: number, py: number) =>
+        rects.some(
+          ([x0, y0, x1, y1]) =>
+            px >= (x0 as number) &&
+            px < (x1 as number) &&
+            py >= (y0 as number) &&
+            py < (y1 as number)
+        );
       let n = 0;
-      for (let i = 0; i < p.length; i += 4) {
+      for (let i = 0; i < p.data.length; i += 4) {
+        const differs =
+          p.data[i] !== q.data[i] ||
+          p.data[i + 1] !== q.data[i + 1] ||
+          p.data[i + 2] !== q.data[i + 2] ||
+          p.data[i + 3] !== q.data[i + 3];
         if (
-          p[i] !== q[i] ||
-          p[i + 1] !== q[i + 1] ||
-          p[i + 2] !== q[i + 2] ||
-          p[i + 3] !== q[i + 3]
+          differs &&
+          !masked((i / 4) % p.width, Math.floor(i / 4 / p.width))
         ) {
           n += 1;
         }
       }
       return n;
     },
-    [a, b] as const
+    [a, b, masks] as const
   );
 
 /** 数字を伏せた console.debug([perf] の書式の比較用) */

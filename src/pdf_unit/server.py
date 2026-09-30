@@ -1,8 +1,8 @@
-"""ページ画像・線データ・サムネイルを返すステートレスなFastAPIサーバー。
+"""ページ画像・線データを返すステートレスなFastAPIサーバー。
 
-サーバーはPDFを保存しない。クライアントは開いたPDFから必要なページだけを切り出したPDF
-(1ページ、またはサムネイル用の数ページ)をリクエストボディで送り、サーバーはメモリ上で処理して
-結果を返す(AWS Lambda での実行を想定。ADR 0019, 0020)。
+サーバーはPDFを保存しない。クライアントは開いたPDFから必要な1ページだけを切り出したPDFを
+リクエストボディで送り、サーバーはメモリ上で処理して結果を返す(AWS Lambda での実行を想定。
+ADR 0019, 0020)。サムネイルはブラウザ側(pdf.js)でラスタライズする(ADR 0041)。
 """
 
 from __future__ import annotations
@@ -16,11 +16,10 @@ import sys
 import threading
 import time
 import zlib
-from collections.abc import Container, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-import pdfplumber
 import pypdfium2 as pdfium
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -32,7 +31,8 @@ from starlette.concurrency import run_in_threadpool
 
 from .calibration import calibrate_linewidth
 from .extract import extract_page_lines, extract_page_texts
-from .raster import PageImages, extract_page_images
+from .pdfium_page import PdfiumPage, render_page
+from .raster import extract_images
 from .timing import Timings, add_metric, collect, metric, server_timing_header, stage
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -48,10 +48,6 @@ MAX_DECOMPRESSED_PDF_BYTES = 64 * 1024 * 1024
 MAX_PNG_BASE64_CHARS = int(5.5 * 1024 * 1024)
 _MIN_RESOLUTION = 36
 _MAX_RESOLUTION = 600
-_MAX_THUMBS_PER_REQUEST = 10
-# 埋め込み画像のまとめ取得(/api/page/images)で1回に PNG 化する画像の数の既定値と上限(ADR 0032)
-_DEFAULT_IMAGES_PER_REQUEST = 100
-_MAX_IMAGES_PER_REQUEST = 500
 
 app = FastAPI(title="PDF Unit")
 # 応答を gzip で圧縮する(ADR 0024)。線数の多いページの抽出結果は JSON で6MB(Lambda の応答上限)を超えるが、
@@ -65,9 +61,9 @@ app.add_middleware(GZipMiddleware, compresslevel=4)
 app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets", check_dir=False), name="assets")
 
 # PDFium(pypdfium2)はスレッドセーフではなく、同時に呼ぶとプロセスごとクラッシュする(SIGSEGV)。
-# FastAPIの同期エンドポイントはスレッドプールで並行実行されるため、PDFiumを使う処理
-# (page.to_image / 線幅キャリブレーション / cid文字補完 / 埋め込み画像抽出 / サムネイル)は
-# このロックで直列化する。page_lines内から_imagesを呼ぶため再入可能なRLockにする。
+# FastAPIの同期エンドポイントはスレッドプールで並行実行されるため、PDFiumを使う処理(PDFを開く・図形と文字の
+# 読み取り・ページの描画・埋め込み画像の抽出)は、開いてから閉じるまでをこのロックで直列化する
+# (ADR 0011, 0038)。Lambda は1つの実行環境で同時に1リクエストしか処理しないので、取り合うのはローカルだけ。
 _pdfium_lock = threading.RLock()
 
 
@@ -177,28 +173,22 @@ async def pdf_body(request: Request) -> bytes:
     return data
 
 
-def _open_pdf(data: bytes) -> pdfplumber.PDF:
-    try:
-        return pdfplumber.open(io.BytesIO(data))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"invalid PDF: {e}") from e
-
-
-def _check_page(pdf: pdfplumber.PDF, page_no: int) -> pdfplumber.page.Page:
-    if not 0 <= page_no < len(pdf.pages):
-        raise HTTPException(status_code=404, detail="page not found")
-    return pdf.pages[page_no]
-
-
 @contextmanager
-def _open_page(data: bytes, page_no: int) -> Iterator[pdfplumber.page.Page]:
-    """PDFを開いてページを返す(閉じるのは with を抜けるとき)。開く処理を計測区間 open として記録する。"""
+def _open_page(data: bytes, page_no: int) -> Iterator[pdfium.PdfPage]:
+    """PDFを開いてページを返し、with を抜けるときに閉じる。_pdfium_lock を保持して呼ぶ。
+    開く処理を計測区間 open として記録する。"""
     with stage("open"):
-        pdf = _open_pdf(data)
-    with pdf:
-        with stage("open"):
-            page = _check_page(pdf, page_no)
-        yield page
+        try:
+            pdf = pdfium.PdfDocument(data)
+        except pdfium.PdfiumError as e:
+            raise HTTPException(status_code=400, detail=f"invalid PDF: {e}") from e
+    try:
+        if not 0 <= page_no < len(pdf):
+            raise HTTPException(status_code=404, detail="page not found")
+        yield pdf[page_no]
+    finally:
+        # 開いたページ・テキストページも一緒に閉じる(ロックの外で GC に後片付けさせない)
+        pdf.close()
 
 
 def _png_bytes(image: Image.Image) -> bytes:
@@ -218,70 +208,21 @@ def _shrink_factor(b64_len: int) -> float:
 
 def _render_page(data: bytes, page_no: int, resolution: int) -> tuple[int, str]:
     """ページ画像をレンダリングする。base64が上限を超える場合は解像度を下げて描き直し、実際の解像度を返す。"""
-    with _open_page(data, page_no) as page:
-        while True:
-            add_metric("render_attempts", 1)
-            with _pdfium_locked(), stage("render"):
-                image = page.to_image(resolution=resolution).original
-            metric("render_px", image.width * image.height)
-            with stage("png"):
-                png = _png_bytes(image)
-            with stage("b64"):
-                encoded = _b64(png)
-            metric("resolution", resolution)
-            if len(encoded) <= MAX_PNG_BASE64_CHARS or resolution <= _MIN_RESOLUTION:
-                return resolution, encoded
-            shrunk = int(resolution * _shrink_factor(len(encoded)))
-            resolution = max(_MIN_RESOLUTION, min(resolution - 1, shrunk))
-
-
-def _render_thumbnails(data: bytes, width: int) -> list[dict]:
-    """ボディのPDFの各ページ(最大 _MAX_THUMBS_PER_REQUEST)の縮小画像(線検出なし)。大判図面では数dpi相当になるため、
-    dpi指定ではなく出力幅から倍率を決める。"""
-    thumbs = []
-    with _pdfium_locked():
-        try:
-            with stage("open"):
-                pdf = pdfium.PdfDocument(data)
-        except pdfium.PdfiumError as e:
-            raise HTTPException(status_code=400, detail=f"invalid PDF: {e}") from e
-        try:
-            for page_no in range(min(len(pdf), _MAX_THUMBS_PER_REQUEST)):
-                with stage("render"):
-                    page = pdf[page_no]
-                    # get_widthは回転(/Rotate)反映後の表示幅。renderも回転を反映する
-                    image = page.render(scale=width / page.get_width()).to_pil()
-                with stage("png"):
-                    png = _png_bytes(image)
-                with stage("b64"):
-                    thumbs.append({"page": page_no, "png_base64": _b64(png)})
-        finally:
-            pdf.close()
-    metric("thumbs", len(thumbs))
-    return thumbs
-
-
-def _images(data: bytes, page_no: int, png_indices: Container[int] = ()) -> PageImages:
-    """埋め込み画像の配置情報と、png_indices で指定した画像の PNG(既定は PNG 化しない)。"""
-    with _pdfium_locked(), stage("images"):
-        return extract_page_images(data, page_no, png_indices)
-
-
-def _downscale_png(png: bytes) -> str:
-    """埋め込み画像のbase64が上限を超える場合、Pillowで縮小してから返す。"""
-    encoded = _b64(png)
-    if len(encoded) <= MAX_PNG_BASE64_CHARS:
-        return encoded
-    with stage("downscale"):
-        image = Image.open(io.BytesIO(png))
-        image.load()
-        while len(encoded) > MAX_PNG_BASE64_CHARS and min(image.size) > 1:
-            add_metric("downscale_attempts", 1)
-            factor = _shrink_factor(len(encoded))
-            size = (max(1, int(image.width * factor)), max(1, int(image.height * factor)))
-            image = image.resize(size, Image.Resampling.LANCZOS)
-            encoded = _b64(_png_bytes(image))
-    return encoded
+    while True:
+        add_metric("render_attempts", 1)
+        # 描き直すときも開き直す(文書を開いたままロックを外さない)
+        with _pdfium_locked(), _open_page(data, page_no) as page, stage("render"):
+            image = render_page(page, resolution)
+        metric("render_px", image.width * image.height)
+        with stage("png"):
+            png = _png_bytes(image)
+        with stage("b64"):
+            encoded = _b64(png)
+        metric("resolution", resolution)
+        if len(encoded) <= MAX_PNG_BASE64_CHARS or resolution <= _MIN_RESOLUTION:
+            return resolution, encoded
+        shrunk = int(resolution * _shrink_factor(len(encoded)))
+        resolution = max(_MIN_RESOLUTION, min(resolution - 1, shrunk))
 
 
 @app.get("/", response_model=None)
@@ -309,30 +250,21 @@ _PAGE = 0
 
 
 # 各APIは所要時間の内訳を Server-Timing、件数などを X-Perf-Metrics ヘッダーで返す(ADR 0023)
-@app.post("/api/thumbs")
-def page_thumbnails(response: Response, width: int = 160, data: bytes = Depends(pdf_body)) -> dict:
-    """ボディのPDFの全ページ(最大10)のサムネイル。page はボディ内でのページ番号。"""
-    width = max(60, min(width, 400))
-    with collect() as timings:
-        thumbs = _render_thumbnails(data, width)
-    _set_timing_headers(response, timings)
-    return {"thumbs": thumbs}
-
-
 @app.post("/api/page/lines")
 def page_lines(response: Response, data: bytes = Depends(pdf_body)) -> dict:
-    with collect() as timings, _open_page(data, _PAGE) as page:
+    # 1つの文書で図形・文字・埋め込み画像を読み、線幅補正の描画も行う。すべて PDFium を使うのでロック内
+    with collect() as timings, _pdfium_locked(), _open_page(data, _PAGE) as pdf_page:
         with stage("parse"):
-            page.objects  # pdfminerによるページの解析(結果はpdfplumberが保持し、以降の抽出で使い回す)
+            page = PdfiumPage(pdf_page)  # 図形と文字の読み取り(内訳 parse.paths・parse.chars)
         with stage("vectors"):
-            lines = extract_page_lines(page)  # pdfplumberのみ(PDFium不使用)なのでロック外
-        with _pdfium_locked():
-            with stage("calib"):
-                # 報告linewidthと実描画太さの比(ハイライト幅を実際の線の太さに合わせるため)
-                calib = calibrate_linewidth(page, page.lines + page.rects + page.curves)
-            with stage("texts"):
-                texts = extract_page_texts(page, data, _PAGE)
-            images = _images(data, _PAGE).records
+            lines = extract_page_lines(page)
+        with stage("calib"):
+            # 報告linewidthと実描画太さの比(ハイライト幅を実際の線の太さに合わせるため)
+            calib = calibrate_linewidth(page, page.lines + page.rects + page.curves)
+        with stage("texts"):
+            texts = extract_page_texts(page)
+        with stage("images"):
+            images = extract_images(pdf_page)
         # UIがpdf-libで求めたページ寸法と食い違った場合に合わせられるよう、座標系の基準となる寸法も返す
         size = {"width": page.width, "height": page.height}
         metric("page_pt", f"{page.width:g}x{page.height:g}")
@@ -357,54 +289,6 @@ def page_image(response: Response, resolution: int = 150, data: bytes = Depends(
         actual, encoded = _render_page(data, _PAGE, resolution)
     _set_timing_headers(response, timings)
     return {"resolution": actual, "png_base64": encoded}
-
-
-@app.post("/api/page/images/{index}")
-def embedded_image(response: Response, index: int, data: bytes = Depends(pdf_body)) -> dict:
-    with collect() as timings:
-        with _open_page(data, _PAGE):
-            pass
-        pngs = _images(data, _PAGE, png_indices=(index,)).pngs
-        if index not in pngs:
-            raise HTTPException(status_code=404, detail="image not found")
-        encoded = _downscale_png(pngs[index])
-    _set_timing_headers(response, timings)
-    return {"png_base64": encoded}
-
-
-@app.post("/api/page/images")
-def embedded_images(
-    response: Response,
-    start: int = 0,
-    count: int = _DEFAULT_IMAGES_PER_REQUEST,
-    data: bytes = Depends(pdf_body),
-) -> dict:
-    """埋め込み画像 start 番以降の画像データをまとめて返す(ADR 0032)。
-
-    1回のページ走査で最大 count 枚を PNG 化し、base64 の合計が応答上限(MAX_PNG_BASE64_CHARS)に収まるところで
-    区切る。続きがあれば next に次の画像番号を返す(無ければ null)。各画像の png_base64 は
-    /api/page/images/{k} と同じ処理で作るので、バイト単位で同じになる。
-    """
-    count = max(1, min(count, _MAX_IMAGES_PER_REQUEST))
-    with collect() as timings:
-        with _open_page(data, _PAGE):
-            pass
-        page_images = _images(data, _PAGE, png_indices=range(start, start + count))
-        total = len(page_images.records)
-        if not 0 <= start < max(total, 1):
-            raise HTTPException(status_code=404, detail="image not found")
-        images, size, index = [], 0, start
-        while index in page_images.pngs:
-            encoded = _downscale_png(page_images.pngs[index])
-            # 1枚目は必ず含める(1枚ずつは _downscale_png で上限内に収まっている)
-            if images and size + len(encoded) > MAX_PNG_BASE64_CHARS:
-                break
-            images.append({"index": index, "png_base64": encoded})
-            size += len(encoded)
-            index += 1
-        metric("images_returned", len(images))
-    _set_timing_headers(response, timings)
-    return {"images": images, "total": total, "next": index if index < total else None}
 
 
 def main() -> None:

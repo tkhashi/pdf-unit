@@ -2,6 +2,8 @@
 
 - ステータス: 採用(サーバー側。UI からの利用は Issue #9 で対応)
 - 日付: 2026-09-26
+- 追記(2026-09-26): [0039](0039-embedded-images-as-outlines.md) で、UI は埋め込み画像の画像データを取得しなくなったため、この API も UI からは使っていません。API は残しています。
+- 追記(2026-09-26): [0040](0040-remove-embedded-image-data-api.md) でこの API(`/api/page/images`)を削除しました。
 
 ## コンテキスト
 

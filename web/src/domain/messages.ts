@@ -45,8 +45,8 @@ export const pageInfoText = (page: number, total: number): string =>
 export const tooLargeMessage = (bytes: number, limit: number): string =>
   `このページはデータが大きく(${mb(bytes)}MB、上限${mb(limit)}MB)処理できません`;
 
-export const thumbUnavailableTip = (page: number, bytes: number): string =>
-  `${page + 1}ページ(データが大きく${mb(bytes)}MB、サムネイルを表示できません)`;
+export const thumbUnavailableTip = (page: number): string =>
+  `${page + 1}ページ(サムネイルを表示できません)`;
 
 export const opacityTip = (v: number): string =>
   `元PDFをそのまま描画した原本画像の濃さ(現在 ${v}%)。検出結果と重ねて比較するための下敷きです`;

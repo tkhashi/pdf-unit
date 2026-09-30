@@ -20,7 +20,7 @@ export type Action =
     }
   | { readonly request: number; readonly type: "pageLoadSettled" }
   | {
-      /** サーバー(pdfplumber)が返したページ寸法(座標系の基準) */
+      /** サーバー(PDFium)が返したページ寸法(座標系の基準) */
       readonly pageSize: PageSize;
       readonly request: number;
       readonly type: "pageSizeReported";

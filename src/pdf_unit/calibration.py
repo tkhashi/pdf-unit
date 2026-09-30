@@ -1,10 +1,10 @@
 """線幅(linewidth)の自動キャリブレーション。
 
-pdfplumberが報告する`linewidth`は、PDFの作成ソフトによっては
-実際にPDFビューアで描画される太さと一致しないことがある
-(例: CADのペン幅テーブルがそのままpt値として乗ってくる等)。
+図形の`linewidth`(PdfiumPage が描画時のCTMで換算した太さ)が、PDFの作成ソフトによっては
+実際にPDFビューアで描画される太さと一致しない場合に備える(以前の pdfplumber は `w` を実行した時点の値を
+報告していたため、CADのペン幅テーブルの値がそのまま乗ってくることがあった。ADR 0038)。
 
-page.to_image()(pypdfium2による実際の描画結果)を正解とみなし、
+page.to_image()(PDFiumによる実際の描画結果)を正解とみなし、
 孤立した直線サンプルの実測太さと報告linewidthの比を取ることで、
 「報告値→実際の描画太さ」への補正係数をPDFごとに自動検出する。
 """
@@ -17,12 +17,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal
 
-import pdfplumber
 from PIL import Image
 
+from .pdfium_page import PdfiumPage
 from .timing import metric, stage
 
-VectorRecord = dict  # pdfplumberのオブジェクトdict(object_type, x0, top, linewidth等)をそのまま受け取る
+VectorRecord = dict  # PdfiumPage の図形の dict(object_type, x0, top, linewidth等)をそのまま受け取る
 
 _BACKGROUND_THRESHOLD = 220  # グレースケール明度がこれ以上なら背景(白)とみなす
 _RATIO_MIN = 0.01
@@ -305,7 +305,7 @@ def _robust_scale_from_ratios(ratios: list[float]) -> tuple[float, float]:
 
 
 def calibrate_linewidth(
-    page: pdfplumber.page.Page,
+    page: PdfiumPage,
     records: list[VectorRecord],
     *,
     resolution: int = 200,

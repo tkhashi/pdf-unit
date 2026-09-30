@@ -2,6 +2,7 @@
 
 - ステータス: 採用(PDFを一時ディレクトリに保存し文書IDで参照する方式は [0019](0019-aws-deployment.md) で廃止し、毎回PDFを送るステートレス方式に置き換え。UI を単一HTML・ビルド不要とする方針は [0027](0027-frontend-react-typescript.md) で React + TypeScript に置き換え)
 - 日付: 2026-09-23
+- 追記(2026-09-26): PDF の読み取りは [0038](0038-migrate-to-pypdfium2.md) で PDFium(pypdfium2)だけに移行し、pdfplumber は依存から外しました(単語へのまとめの `extract_words` だけを取り込み)。
 
 ## コンテキスト
 

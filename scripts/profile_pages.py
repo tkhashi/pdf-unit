@@ -1,6 +1,6 @@
 """PDFのページごとにAPIの所要時間・内訳・応答サイズ・ピークメモリを計測する(ADR 0023)。
 
-    uv run python scripts/profile_pages.py <PDF> [--pages 1-5,10] [--endpoints lines,image,images,thumbs]
+    uv run python scripts/profile_pages.py <PDF> [--pages 1-5,10] [--endpoints lines,image]
         [--resolutions 100,200,400] [--out result.jsonl] [--dump DIR] [--cprofile DIR]
 
 - ページの切り出しは UI と同じく pdf-lib(web/ の依存。Node.js)で行う(copyPages、useObjectStreams: false)。
@@ -37,10 +37,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # UI と同じ pdf-lib(web/ の依存。pnpm --dir web install で入る)
 PDF_LIB = ROOT / "web" / "node_modules" / "pdf-lib" / "dist" / "pdf-lib.min.js"
-# UI と同じ値(web/src/domain/constants.ts の RESOLUTIONS・THUMB_BATCH・サムネイル幅(140px × devicePixelRatio 2))
+# UI と同じ値(web/src/domain/constants.ts の RESOLUTIONS)
 DEFAULT_RESOLUTIONS = "100,200,400"
-THUMB_BATCH = 10
-THUMB_WIDTH = 280
 MAX_SEND_BYTES = 4 * 1024 * 1024
 
 # UI の extractPages と同じ処理で、指定ページだけを含むPDFを書き出す
@@ -113,7 +111,7 @@ def _run_child(job: dict) -> dict:
     from pdf_unit import server
 
     data = Path(job["pdf"]).read_bytes()
-    result = {k: job[k] for k in ("kind", "page", "resolution", "index") if k in job}
+    result = {k: job[k] for k in ("kind", "page", "resolution") if k in job}
     result["req_bytes"] = len(data)
     result["over_limit"] = len(data) > MAX_SEND_BYTES  # UI では送信しない大きさ(計測はする)
     result["maxrss_base_mb"] = _maxrss_mb()
@@ -126,8 +124,6 @@ def _run_child(job: dict) -> dict:
         call = {
             "lines": lambda: server.page_lines(response=Response(), data=data),
             "image": lambda: server.page_image(response=Response(), resolution=job["resolution"], data=data),
-            "images": lambda: server.embedded_image(response=Response(), index=job["index"], data=data),
-            "thumbs": lambda: server.page_thumbnails(response=Response(), width=THUMB_WIDTH, data=data),
         }[job["kind"]]
         profiler = cProfile.Profile()
         start = time.perf_counter()
@@ -140,8 +136,6 @@ def _run_child(job: dict) -> dict:
     path, query = {
         "lines": ("/api/page/lines", ""),
         "image": ("/api/page/image", f"resolution={job.get('resolution')}"),
-        "images": (f"/api/page/images/{job.get('index')}", ""),
-        "thumbs": ("/api/thumbs", f"width={THUMB_WIDTH}"),
     }[job["kind"]]
     log = io.StringIO()  # ミドルウェアの計測ログは捨てる(同じ値をヘッダーから取る)
     start = time.perf_counter()
@@ -211,7 +205,7 @@ def _spawn(job: dict) -> dict:
         [sys.executable, __file__, "--child", json.dumps(job)], capture_output=True, text=True
     )
     if proc.returncode != 0:
-        return {**{k: job.get(k) for k in ("kind", "page", "resolution", "index")},
+        return {**{k: job.get(k) for k in ("kind", "page", "resolution")},
                 "error": proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else f"exit {proc.returncode}"}
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
@@ -220,8 +214,6 @@ def _label(r: dict) -> str:
     label = r["kind"]
     if r.get("resolution"):
         label += f"@{r['resolution']}"
-    if r.get("index") is not None:
-        label += f"#{r['index']}"
     return label
 
 
@@ -263,11 +255,10 @@ def _summarize(results: list[dict]) -> None:
         peak = max(ok, key=lambda r: r["maxrss_mb"])
         print(f"ピークメモリの最大: {peak['maxrss_mb']:.0f}MB (p{peak['page'] + 1} {_label(peak)}、"
               f"起動直後 {peak['maxrss_base_mb']:.0f}MB、Lambda は2048MB)")
-    over = sorted({(r["page"] + 1, r["kind"] == "thumbs") for r in results if r.get("over_limit")})
+    over = sorted({r["page"] + 1 for r in results if r.get("over_limit")})
     if over:
-        # thumbs は10ページ単位のバッチ(UI は半分ずつに分けて送り直す)。それ以外は1ページ(UI では処理できない)
-        print("送信上限(4MB)を超える切り出し: "
-              + ", ".join(f"p{p}〜のサムネイル" if thumbs else f"p{p}" for p, thumbs in over))
+        # 1ページ分がこの大きさを超えると UI では処理できない
+        print("送信上限(4MB)を超える切り出し: " + ", ".join(f"p{p}" for p in over))
     for r in failed:
         print(f"HTTP {r['status']}: p{r['page'] + 1} {_label(r)}(集計から除外)")
     for r in errors:
@@ -282,9 +273,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pdf", type=Path)
     parser.add_argument("--pages", help="1始まりのページ番号(例: 1-5,10)。省略時は全ページ")
-    parser.add_argument("--endpoints", default="lines,image,images,thumbs")
+    parser.add_argument("--endpoints", default="lines,image")
     parser.add_argument("--resolutions", default=DEFAULT_RESOLUTIONS, help="原本画像の解像度(dpi)")
-    parser.add_argument("--max-images", type=int, default=3, help="1ページで計測する埋め込み画像の数(0で全件)")
     parser.add_argument("--splitter", choices=["auto", "pdflib", "pdfium"], default="auto")
     parser.add_argument("--out", type=Path, help="結果の JSONL")
     parser.add_argument("--dump", type=Path, help="応答ボディの保存先ディレクトリ")
@@ -304,11 +294,6 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         split_jobs = [{"out": f"{tmp}/p{p}.pdf", "indices": [p]} for p in pages]
-        batches = sorted({p // THUMB_BATCH for p in pages}) if "thumbs" in endpoints else []
-        split_jobs += [
-            {"out": f"{tmp}/t{b}.pdf", "indices": list(range(b * THUMB_BATCH, min((b + 1) * THUMB_BATCH, count)))}
-            for b in batches
-        ]
         splitter = _split(args.pdf, split_jobs, args.splitter)
         print(f"{args.pdf.name}: {count}ページ中 {len(pages)}ページを計測(切り出し: {splitter})", file=sys.stderr)
 
@@ -337,22 +322,11 @@ def main() -> None:
 
             for p in pages:
                 pdf = f"{tmp}/p{p}.pdf"
-                images = None
                 if "lines" in endpoints:
-                    images = run(job("lines", p, pdf)).get("metrics", {}).get("images")
+                    run(job("lines", p, pdf))
                 if "image" in endpoints:
                     for res in resolutions:
                         run(job("image", p, pdf, resolution=res))
-                if "images" in endpoints:
-                    if images is None:  # lines を計測しない場合は画像数を別に数える
-                        from pdf_unit.raster import extract_page_images
-
-                        images = len(extract_page_images(Path(pdf).read_bytes(), 0).records)
-                    limit = images if args.max_images == 0 else min(images, args.max_images)
-                    for k in range(limit):
-                        run(job("images", p, pdf, index=k))
-            for b in batches:
-                run(job("thumbs", b * THUMB_BATCH, f"{tmp}/t{b}.pdf"))
         finally:
             if out:
                 out.close()

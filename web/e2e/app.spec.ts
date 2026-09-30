@@ -9,6 +9,7 @@ import {
   state,
   text,
   tooltip,
+  type Ui,
   viewportBox,
 } from "./harness";
 
@@ -54,6 +55,60 @@ test("PDFを開いて、凡例・線幅補正・ホバー・選択・ツール�
     "PDFに埋め込まれた画像だけを表示(線・文字は隠す)"
   );
   expect(ui.cspViolations).toEqual([]);
+  expect(ui.errors).toEqual([]);
+  await ui.page.context().close();
+});
+
+const thumbState = (ui: Ui) =>
+  ui.page.evaluate((sel) => {
+    const aside = document.querySelector(sel) as HTMLElement;
+    return [...aside.querySelectorAll("[data-page]")].map((b) => ({
+      loaded: !!b.querySelector("img")?.hasAttribute("src"),
+      page: Number((b as HTMLElement).dataset.page),
+    }));
+  }, ui.sel.thumbs);
+
+test("サムネイルは本体ページの読み込みを待たずに表示され始める", async ({
+  browser,
+}) => {
+  // 本体ページの読み込みを遅らせても、サムネイルはブラウザ内(pdf.js)で描画するため止まらない(ADR 0041)
+  const ui = await openUi(browser, "new", {
+    delay: { "/api/page/lines": 2000 },
+  });
+  await openFile(ui, "multipage.pdf");
+  await ui.page.waitForFunction(
+    (sel) => {
+      const aside = document.querySelector(sel);
+      return !!aside?.querySelector("[data-page] img[src]");
+    },
+    ui.sel.thumbs,
+    { timeout: 5000 }
+  );
+  const thumbs = await thumbState(ui);
+  expect(thumbs.some((t) => t.loaded)).toBe(true);
+  expect(ui.cspViolations).toEqual([]);
+  await ui.page.context().close();
+});
+
+test("開いた直後から全ページが背景で先読みされ、最終的にすべて表示される", async ({
+  browser,
+}) => {
+  const ui = await openUi(browser, "new");
+  await openFile(ui, "multipage.pdf");
+  await ui.page.waitForFunction(
+    (sel) => {
+      const aside = document.querySelector(sel);
+      const buttons = aside?.querySelectorAll("[data-page]") ?? [];
+      return (
+        buttons.length > 0 &&
+        [...buttons].every((b) => b.querySelector("img")?.hasAttribute("src"))
+      );
+    },
+    ui.sel.thumbs,
+    { timeout: 15_000 }
+  );
+  const thumbs = await thumbState(ui);
+  expect(thumbs.every((t) => t.loaded)).toBe(true);
   expect(ui.errors).toEqual([]);
   await ui.page.context().close();
 });

@@ -1,33 +1,15 @@
-// ページの表示: 線データを取得してモデルを作り、描画資源(Path2D・埋め込み画像)を用意する
+// ページの表示: 線データを取得してモデルを作り、描画資源(Path2D・埋め込み画像の範囲)を用意する
 import { flushSync } from "react-dom";
-import { pngDataUrl } from "../domain/format";
 import { buildPageModel } from "../domain/page-model";
-import type { EmbeddedImageResponse, LinesResponse } from "../domain/types";
+import type { LinesResponse } from "../domain/types";
 import { viewportSize } from "../render/dom";
 import { preparePageResources } from "../render/resources";
 import { apiPost } from "../services/api";
 import { perfMark, perfStart } from "../services/perf";
-import type { ControllerContext, DocumentSession } from "./context";
+import type { ControllerContext } from "./context";
 
-const loadEmbeddedImage = (
-  ctx: ControllerContext,
-  session: DocumentSession,
-  page: number,
-  index: number,
-  el: HTMLImageElement
-): void => {
-  session
-    .pageBody(page)
-    .then((body) =>
-      apiPost<EmbeddedImageResponse>(`/api/page/images/${index}`, body)
-    )
-    .then((r) => {
-      if (ctx.session() === session) {
-        el.src = pngDataUrl(r.png_base64);
-      }
-    })
-    .catch(() => undefined);
-};
+// 表示中のページの線データの要求。次のページを要求したら取り消す
+const linesRequests = new WeakMap<ControllerContext, AbortController>();
 
 const errorMessage = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
@@ -53,14 +35,20 @@ export const showPage = async (
   const {
     page: { request },
   } = app.getState();
+  linesRequests.get(ctx)?.abort();
+  const abort = new AbortController();
+  linesRequests.set(ctx, abort);
   let data: LinesResponse;
   try {
     data = await apiPost<LinesResponse>(
       "/api/page/lines",
-      await session.pageBody(n)
+      await session.pageBody(n),
+      abort.signal
     );
   } catch (e) {
-    app.dispatch({ message: errorMessage(e), request, type: "pageFailed" });
+    if (!abort.signal.aborted) {
+      app.dispatch({ message: errorMessage(e), request, type: "pageFailed" });
+    }
     return;
   } finally {
     app.dispatch({ request, type: "pageLoadSettled" });
@@ -76,11 +64,7 @@ export const showPage = async (
     viewport: viewportSize(dom),
   });
   const model = buildPageModel(data);
-  preparePageResources(
-    model,
-    (index, el) => loadEmbeddedImage(ctx, session, n, index, el),
-    () => ctx.renderer.invalidate(true)
-  );
+  preparePageResources(model);
   perfMark(n, "描画準備完了", `${model.items.length}要素`);
   app.dispatch({ model, request, type: "pageLoaded" });
   // store の変更で予約された描画と同じフレームの後に呼ばれる

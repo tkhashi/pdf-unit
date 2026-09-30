@@ -15,7 +15,7 @@ export const loadPdf = (data: ArrayBuffer): Promise<PDFDocument> =>
 export const isEncryptedPdfError = (e: unknown): boolean =>
   e instanceof EncryptedPDFError;
 
-/** pdfplumber の page.width/height と同じ定義: CropBox(無ければMediaBox)の幅・高さ。/Rotate 90/270 なら入れ替える */
+/** サーバー(PDFium)とほぼ同じ定義: CropBox(無ければMediaBox)の幅・高さ。/Rotate 90/270 なら入れ替える。サーバーは MediaBox との交わりを取るので、CropBox がはみ出すページはサーバーの寸法で合わせ直す */
 export const pageSize = (page: PDFPage): PageSize => {
   const box = page.getCropBox();
   const rot = ((page.getRotation().angle % 360) + 360) % 360;
