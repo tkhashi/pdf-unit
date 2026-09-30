@@ -17,12 +17,24 @@ export interface DocState {
   readonly pages: readonly PageSize[];
 }
 
+/** 解析中の擬似プログレスバーの表示状態(実際の処理段階とは連動しない) */
+export interface PageProgress {
+  /** 最初の5段階に均等配分する合計見積もり時間(ms)。通信オーバーヘッドは含まない */
+  readonly primaryMs: number;
+  readonly ratio: number;
+  readonly stageIndex: number;
+  /** 最後の段階(解析結果まとめ)の見積もり時間(ms)。通信オーバーヘッドを含む */
+  readonly tailMs: number;
+}
+
 export interface PageState {
   /** 表示中のページ(0始まり) */
   readonly index: number;
   /** 本体ページの線データを取得中 */
   readonly loading: boolean;
   readonly model: PageModel;
+  /** 取得中のみ値を持つ。loading が false の間は null */
+  readonly progress: PageProgress | null;
   /** ページ連続切替時に、古いページの応答で上書きしないための通し番号 */
   readonly request: number;
 }
@@ -61,6 +73,8 @@ export interface AppState {
   readonly dropOver: boolean;
   /** ホバー中の要素(無ければ -1) */
   readonly hovered: number;
+  /** 直近に完了したページ解析の実測時間(ms)。次回の擬似プログレスバーの見積もりに使う */
+  readonly lastPageDurationMs: number | null;
   /** 凡例の件数(最初のページの線データを受け取るまでは null = 凡例なし) */
   readonly legendCounts: TypeCounts | null;
   readonly originalImage: OriginalImageState;
@@ -85,9 +99,16 @@ export const INITIAL_STATE: AppState = {
   dragging: false,
   dropOver: false,
   hovered: -1,
+  lastPageDurationMs: null,
   legendCounts: null,
   originalImage: INITIAL_ORIGINAL_IMAGE,
-  page: { index: 0, loading: false, model: EMPTY_PAGE_MODEL, request: 0 },
+  page: {
+    index: 0,
+    loading: false,
+    model: EMPTY_PAGE_MODEL,
+    progress: null,
+    request: 0,
+  },
   rasterOpacity: DEFAULT_RASTER_OPACITY,
   selection: null,
   status: plainStatus(""),

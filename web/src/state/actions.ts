@@ -18,7 +18,18 @@ export type Action =
       /** 表示領域の大きさ(ページ全体を収める表示にするため) */
       readonly viewport: Size;
     }
-  | { readonly request: number; readonly type: "pageLoadSettled" }
+  | {
+      readonly durationMs: number;
+      readonly request: number;
+      readonly type: "pageLoadSettled";
+    }
+  | {
+      readonly ratio: number;
+      readonly request: number;
+      readonly stageIndex: number;
+      readonly type: "pageProgressTicked";
+    }
+  | { readonly request: number; readonly type: "pageProgressCleared" }
   | {
       /** サーバー(PDFium)が返したページ寸法(座標系の基準) */
       readonly pageSize: PageSize;

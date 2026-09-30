@@ -29,14 +29,23 @@ export const ThumbnailButton = memo(
         ref={ref}
         type="button"
       >
-        <img
-          alt={`${page + 1}ページ`}
-          className={`block h-auto w-[140px] shadow-sm ${unavailableTip ? "thumb-unavailable" : "bg-white"}`}
-          height={Math.round((THUMB_WIDTH * size.height) / size.width)}
-          src={src ?? undefined}
+        <span
+          className={`relative block h-auto w-[140px] shadow-sm ${unavailableTip ? "thumb-unavailable" : "bg-white"}`}
           style={{ aspectRatio: `${size.width} / ${size.height}` }}
-          width={THUMB_WIDTH}
-        />
+        >
+          {src ? (
+            <img
+              alt={`${page + 1}ページ`}
+              className="block h-auto w-[140px]"
+              height={Math.round((THUMB_WIDTH * size.height) / size.width)}
+              src={src}
+              width={THUMB_WIDTH}
+            />
+          ) : null}
+          {src === null && !unavailableTip ? (
+            <span className="loading loading-spinner loading-sm absolute inset-0 m-auto text-primary" />
+          ) : null}
+        </span>
         <span>{page + 1}</span>
       </button>
     );
