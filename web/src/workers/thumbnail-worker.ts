@@ -23,14 +23,22 @@ interface RenderJob {
   readonly docId: number;
   readonly kind: "render";
   readonly page: number;
+  /** 数値が小さいほど先に処理する(可視中=0、先読み=1)。キュー内で reprioritize により書き換わる */
+  priority: number;
   readonly reqId: number;
   readonly width: number;
+}
+interface ReprioritizeJob {
+  readonly docId: number;
+  readonly kind: "reprioritize";
+  readonly page: number;
+  readonly priority: number;
 }
 interface CloseJob {
   readonly docId: number;
   readonly kind: "close";
 }
-type InMessage = OpenJob | RenderJob | CloseJob;
+type InMessage = OpenJob | RenderJob | ReprioritizeJob | CloseJob;
 
 type OutMessage =
   | { readonly kind: "opened"; readonly docId: number }
@@ -75,6 +83,40 @@ class OffscreenCanvasFactory {
 }
 
 const tasks = new Map<number, PDFDocumentLoadingTask>();
+
+// 描画は1件ずつ直列に行う(pdf.js の処理は重く、並行させてもメモリを増やすだけ)。
+// 可視範囲のページを優先し、それ以外は開いた直後から背景で1ページずつ先読みする
+const queue: RenderJob[] = [];
+let processing = false;
+
+const pumpQueue = (): void => {
+  if (processing) {
+    return;
+  }
+  const job = queue.shift();
+  if (!job) {
+    return;
+  }
+  processing = true;
+  handleRender(job).finally(() => {
+    processing = false;
+    pumpQueue();
+  });
+};
+
+const enqueueRender = (job: RenderJob): void => {
+  queue.push(job);
+  queue.sort((a, b) => a.priority - b.priority);
+  pumpQueue();
+};
+
+const reprioritize = (job: ReprioritizeJob): void => {
+  const entry = queue.find((j) => j.docId === job.docId && j.page === job.page);
+  if (entry) {
+    entry.priority = job.priority;
+    queue.sort((a, b) => a.priority - b.priority);
+  }
+};
 
 const errorMessage = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
@@ -151,6 +193,10 @@ const handleRender = async (job: RenderJob): Promise<void> => {
 const handleClose = (job: CloseJob): void => {
   tasks.get(job.docId)?.destroy();
   tasks.delete(job.docId);
+  // 閉じた文書の未着手ジョブ(先読み分)はもう不要
+  const remaining = queue.filter((j) => j.docId !== job.docId);
+  queue.length = 0;
+  queue.push(...remaining);
 };
 
 self.onmessage = (e: MessageEvent<InMessage>) => {
@@ -158,7 +204,9 @@ self.onmessage = (e: MessageEvent<InMessage>) => {
   if (job.kind === "open") {
     handleOpen(job);
   } else if (job.kind === "render") {
-    handleRender(job);
+    enqueueRender(job);
+  } else if (job.kind === "reprioritize") {
+    reprioritize(job);
   } else {
     handleClose(job);
   }
