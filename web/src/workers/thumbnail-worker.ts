@@ -199,8 +199,20 @@ const handleRender = async (job: RenderJob): Promise<void> => {
 const handleClose = (job: CloseJob): void => {
   tasks.get(job.docId)?.destroy();
   tasks.delete(job.docId);
-  // 閉じた文書の未着手ジョブ(先読み分)はもう不要
-  const remaining = queue.filter((j) => j.docId !== job.docId);
+  // 閉じた文書の未着手ジョブ(先読み分)はもう不要。ただし応答しないと、要求元の Promise が解決されない。
+  // その Promise が閉じた文書全体を参照し続けてしまうため、失敗として答えてから捨てる(ADR 0048)
+  const remaining: RenderJob[] = [];
+  for (const j of queue) {
+    if (j.docId === job.docId) {
+      postMessage({
+        error: "document closed",
+        kind: "render-error",
+        reqId: j.reqId,
+      } satisfies OutMessage);
+    } else {
+      remaining.push(j);
+    }
+  }
   queue.length = 0;
   queue.push(...remaining);
 };
