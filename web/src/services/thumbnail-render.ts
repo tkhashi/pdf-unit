@@ -84,18 +84,44 @@ export const openThumbnailSource = (
   });
 };
 
+/** 数値が小さいほど先に処理する(可視中=0、先読み=1) */
+export const THUMB_PRIORITY_VISIBLE = 0;
+export const THUMB_PRIORITY_BACKGROUND = 1;
+
 /** 指定ページを幅 width(px) でラスタライズし、data URL を返す */
 export const renderThumb = (
   source: ThumbnailSource,
   page: number,
-  width: number
+  width: number,
+  priority: number
 ): Promise<string> => {
   const w = ensureWorker();
   const reqId = nextReqId;
   nextReqId += 1;
   return new Promise((resolve, reject) => {
     pending.set(reqId, { reject, resolve });
-    w.postMessage({ docId: source.docId, kind: "render", page, reqId, width });
+    w.postMessage({
+      docId: source.docId,
+      kind: "render",
+      page,
+      priority,
+      reqId,
+      width,
+    });
+  });
+};
+
+/** 既に要求済みのページの優先度を変える(表示範囲に入って先読みから昇格した場合など) */
+export const reprioritizeThumb = (
+  source: ThumbnailSource,
+  page: number,
+  priority: number
+): void => {
+  worker?.postMessage({
+    docId: source.docId,
+    kind: "reprioritize",
+    page,
+    priority,
   });
 };
 

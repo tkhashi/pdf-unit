@@ -179,7 +179,7 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 - **埋め込み画像**:
   - Form XObject 内の画像も含めて抽出します。PDF 内で1枚の絵が複数の画像(帯状など)に分けて保存されている場合は、分かれたまま1つずつ扱います
   - 画像データは取得せず、`/api/page/lines` が返す配置範囲(四隅)に枠を描きます。枠の中は、原本画像の濃さの設定によらず原本画像を不透明で表示するので、絵柄はそのまま見えます([ADR 0039](docs/adr/0039-embedded-images-as-outlines.md))
-- **サムネイル**: 線検出を行わず、ブラウザ内([pdf.js](https://mozilla.github.io/pdf.js/)、専用の Web Worker)で元PDFを出力幅140px前後に縮小描画したものです([ADR 0041](docs/adr/0041-thumbnail-client-side-rendering.md))。サーバーへは送らず、`IntersectionObserver` で一覧の表示範囲に入ったページだけを描画します(同じページを重複して要求しません)。本体ページの読み込みは待ちません。描画に失敗したページは「表示できません」表示にします
+- **サムネイル**: 線検出を行わず、ブラウザ内([pdf.js](https://mozilla.github.io/pdf.js/)、専用の Web Worker)で元PDFを出力幅140px前後に縮小描画したものです([ADR 0041](docs/adr/0041-thumbnail-client-side-rendering.md))。サーバーへは送らず、本体ページの読み込みも待ちません。文書を開いた直後から全ページを1ページずつ背景で先読みし(Worker内は常に1ページずつ処理するためメモリは一定に収まります)、`IntersectionObserver` で表示範囲に入ったページは先読みの順番を追い越して先に描画します([ADR 0042](docs/adr/0042-thumbnail-prefetch-all-pages.md))。描画に失敗したページは「表示できません」表示にします
 
 ## API
 

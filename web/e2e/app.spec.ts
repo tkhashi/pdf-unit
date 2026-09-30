@@ -68,7 +68,7 @@ const thumbState = (ui: Ui) =>
     }));
   }, ui.sel.thumbs);
 
-test("サムネイルは本体ページの読み込みを待たずに表示範囲だけ表示される", async ({
+test("サムネイルは本体ページの読み込みを待たずに表示され始める", async ({
   browser,
 }) => {
   // 本体ページの読み込みを遅らせても、サムネイルはブラウザ内(pdf.js)で描画するため止まらない(ADR 0041)
@@ -85,9 +85,30 @@ test("サムネイルは本体ページの読み込みを待たずに表示範�
     { timeout: 5000 }
   );
   const thumbs = await thumbState(ui);
-  // 表示範囲(先頭付近)だけが読み込まれ、下の方(表示範囲外)はまだ要求されない
-  expect(thumbs.slice(0, 3).some((t) => t.loaded)).toBe(true);
-  expect(thumbs.slice(-3).every((t) => t.loaded)).toBe(false);
+  expect(thumbs.some((t) => t.loaded)).toBe(true);
   expect(ui.cspViolations).toEqual([]);
+  await ui.page.context().close();
+});
+
+test("開いた直後から全ページが背景で先読みされ、最終的にすべて表示される", async ({
+  browser,
+}) => {
+  const ui = await openUi(browser, "new");
+  await openFile(ui, "multipage.pdf");
+  await ui.page.waitForFunction(
+    (sel) => {
+      const aside = document.querySelector(sel);
+      const buttons = aside?.querySelectorAll("[data-page]") ?? [];
+      return (
+        buttons.length > 0 &&
+        [...buttons].every((b) => b.querySelector("img")?.hasAttribute("src"))
+      );
+    },
+    ui.sel.thumbs,
+    { timeout: 15_000 }
+  );
+  const thumbs = await thumbState(ui);
+  expect(thumbs.every((t) => t.loaded)).toBe(true);
+  expect(ui.errors).toEqual([]);
   await ui.page.context().close();
 });

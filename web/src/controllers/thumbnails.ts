@@ -1,10 +1,16 @@
 // サムネイル一覧: ブラウザ内(pdf.js の専用 Worker)でラスタライズする(ADR 0041)。
-// サーバーへの通信が無くなったため、本体ページの読み込み完了を待たずに、表示範囲に入った
-// ページから順に IntersectionObserver で検知して要求する
+// 文書を開いたら全ページを背景優先度で1ページずつ先読みし(Worker側で直列処理するため
+// メモリは1ページ分の作業領域に収まる)、IntersectionObserver で検知した表示範囲の
+// ページは優先度を上げて先に描画させる
 import { THUMB_MAX_WIDTH, THUMB_WIDTH } from "../domain/constants";
 import { thumbUnavailableTip } from "../domain/messages";
 import { devicePixelRatio } from "../render/dom";
-import { renderThumb } from "../services/thumbnail-render";
+import {
+  renderThumb,
+  reprioritizeThumb,
+  THUMB_PRIORITY_BACKGROUND,
+  THUMB_PRIORITY_VISIBLE,
+} from "../services/thumbnail-render";
 import type { ControllerContext, DocumentSession } from "./context";
 
 export interface ThumbnailScheduler {
@@ -19,15 +25,18 @@ export interface ThumbnailScheduler {
 interface Tracking {
   readonly elements: Map<number, HTMLElement>;
   readonly observer: IntersectionObserver | null;
-  /** 要求済み(描画中・描画済み・失敗確定)のページ */
+  /** 要求済み(背景で先読み中・描画中・描画済み・失敗確定)のページ */
   readonly requested: Set<number>;
   readonly session: DocumentSession | null;
-  /** 表示範囲内でまだ要求していないページ */
+  /** 表示範囲内でまだ優先度を上げていないページ */
   readonly visible: Set<number>;
 }
 
 const pageOf = (el: Element): number =>
   Number((el as HTMLElement).dataset.page);
+
+const thumbWidth = (): number =>
+  Math.min(THUMB_MAX_WIDTH, Math.round(THUMB_WIDTH * devicePixelRatio()));
 
 export const createThumbnailScheduler = (
   ctx: ControllerContext
@@ -45,11 +54,12 @@ export const createThumbnailScheduler = (
     tracking: Tracking,
     target: DocumentSession,
     page: number,
-    width: number
+    width: number,
+    priority: number
   ): Promise<void> => {
     try {
       const source = await target.thumbSource;
-      const src = await renderThumb(source, page, width);
+      const src = await renderThumb(source, page, width, priority);
       if (tracking !== t) {
         return;
       }
@@ -86,17 +96,22 @@ export const createThumbnailScheduler = (
     if (!(target && ctx.session() === target)) {
       return;
     }
-    const width = Math.min(
-      THUMB_MAX_WIDTH,
-      Math.round(THUMB_WIDTH * devicePixelRatio())
-    );
+    const width = thumbWidth();
     for (const page of tracking.visible) {
       tracking.visible.delete(page);
       if (tracking.requested.has(page)) {
-        continue; // 同じページを重複して要求しない
+        // 既に背景で先読み中かもしれないので優先度だけ上げる(描画済みなら無視される)
+        target.thumbSource
+          .then((source) =>
+            reprioritizeThumb(source, page, THUMB_PRIORITY_VISIBLE)
+          )
+          .catch(() => {
+            // 文書を開けなかった場合は loadOne 側で失敗表示になる
+          });
+        continue;
       }
       tracking.requested.add(page);
-      loadOne(tracking, target, page, width);
+      loadOne(tracking, target, page, width, THUMB_PRIORITY_VISIBLE);
     }
   };
 
@@ -119,13 +134,21 @@ export const createThumbnailScheduler = (
           { root, rootMargin: "300px 0px" }
         )
       : null;
+    const requested = new Set<number>();
     t = {
       elements: new Map(),
       observer,
-      requested: new Set(),
+      requested,
       session,
       visible,
     };
+    // 表示範囲を待たず、全ページを背景優先度で1ページずつ先読みする(Worker側で直列処理)
+    const width = thumbWidth();
+    const count = session.pdf.getPageCount();
+    for (let page = 0; page < count; page += 1) {
+      requested.add(page);
+      loadOne(t, session, page, width, THUMB_PRIORITY_BACKGROUND);
+    }
   };
 
   const register = (page: number, el: HTMLElement | null): void => {
