@@ -85,6 +85,35 @@ def test_linewidth_is_drawn_width():
     assert widths == [3.0, 3.0, 0, 1.0]
 
 
+def test_fills_are_separated_from_strokes():
+    """塗るだけのパスは線にしない。塗りの規則はパス全体に掛かるので、サブパスをまとめて1件にする(ADR 0044)。"""
+    body = lines_of("fills")
+    assert [(ln["type"], ln["linewidth"], ln["color"]) for ln in body["lines"]] == [
+        ("rect", 1.0, "rgb(0,255,0)"), ("line", 2.0, "rgb(0,0,0)"),
+    ]
+    fills = [(f["type"], f["fill_rule"], f["linewidth"], f["color"], f["bbox"], len(f["polylines"]))
+             for f in body["fills"]]
+    assert fills == [
+        ("fill", "nonzero", 20.0, "rgb(255,0,0)", [10, 140, 40, 180], 1),
+        ("fill", "evenodd", 1.0, "rgb(0,0,255)", [100, 50, 150, 100], 2),
+        ("fill", "nonzero", 1.0, "rgb(0,255,0)", [60, 60, 80, 80], 1),
+    ]
+    assert body["fills"][1]["d"] == ("M100.00,100.00 L150.00,100.00 L150.00,50.00 L100.00,50.00 Z "
+                                     "M110.00,90.00 L140.00,90.00 L140.00,60.00 L110.00,60.00 Z")
+    assert body["fills"][0]["polylines"][0] == [10, 180, 40, 180, 40, 140, 10, 140, 10, 180]
+
+
+def test_fill_clips():
+    """クリップは表示座標で返し、フォームに掛かるクリップも中の塗りに重ねる。同じクリップは1つにまとめる(ADR 0046)。"""
+    body = lines_of("fill_clips")
+    assert [f["clip"] for f in body["fills"]] == [[0], [1, 2], []]
+    boxes = [(min(p[0::2]), min(p[1::2]), max(p[0::2]), max(p[1::2])) for c in body["clip_paths"] for p in c["polylines"]]
+    # ページ: 5..15 を 2 倍 / フォームに掛かるクリップ: 0..60 × 0..100 / フォーム内: 5..15 を 0.5 倍 + 20 してから 2 倍 + 10。
+    # PDFium は図形を完全に含む矩形のクリップを省く(効果が無いため)ので、フォームの中身を実際に切る範囲にしている
+    assert boxes == [(10, 170, 30, 190), (0, 100, 60, 200), (55, 135, 65, 145)]
+    assert body["clip_paths"][0]["d"] == "M10.00,190.00 L30.00,190.00 L30.00,170.00 L10.00,170.00 Z"
+
+
 def test_colors():
     body = lines_of("colors")
     colors = [ln["color"] for ln in body["lines"]]

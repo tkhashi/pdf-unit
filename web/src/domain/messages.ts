@@ -6,6 +6,7 @@ import type { CalibrationMethod } from "./types";
 /** 凡例の種類ごとの補足(マウスオーバー) */
 export const TYPE_LABELS: Readonly<Record<ItemType, string>> = {
   curve: "曲線(ベジェ曲線を含む)",
+  fill: "塗りつぶし(図形の塗りの範囲。種類の色で半透明に表示)",
   image: "PDFに埋め込まれた画像",
   line: "直線",
   rect: "矩形",

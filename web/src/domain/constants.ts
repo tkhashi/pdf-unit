@@ -1,13 +1,21 @@
 // 旧 index.html の定数をそのまま移したもの。値を変えると検出・描画・通信の結果が変わる
 
 /** 要素の種類。凡例・一括チェックはこの順に並ぶ */
-export const ITEM_TYPES = ["line", "rect", "curve", "text", "image"] as const;
+export const ITEM_TYPES = [
+  "line",
+  "rect",
+  "curve",
+  "fill",
+  "text",
+  "image",
+] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 export type StrokeType = "line" | "rect" | "curve";
-export type AreaType = "text" | "image";
+export type AreaType = "fill" | "text" | "image";
 
 export const TYPE_COLORS: Readonly<Record<ItemType, string>> = {
   curve: "#c026d3",
+  fill: "#0891b2",
   image: "#64748b",
   line: "#2563eb",
   rect: "#16a34a",
@@ -16,6 +24,7 @@ export const TYPE_COLORS: Readonly<Record<ItemType, string>> = {
 
 /** 面で判定する要素(文字・画像)の優先度ペナルティ(許容距離に対する倍率)。重なる線を優先する */
 export const AREA_PENALTY: Readonly<Record<AreaType, number>> = {
+  fill: 0.75,
   image: 0.75,
   text: 0.5,
 };
@@ -24,6 +33,8 @@ export const AREA_PENALTY: Readonly<Record<AreaType, number>> = {
 export const HOVER_COLOR = "rgba(239, 68, 68, 0.6)";
 export const GROUP_COLOR = "rgba(250, 204, 21, 0.85)";
 export const DIM_ALPHA = 0.2;
+/** 塗りつぶしは本来の色によらず種類の色で、下の線・原本画像が透けるように塗る(ADR 0044) */
+export const FILL_ALPHA = 0.3;
 export const RESOLUTIONS: readonly number[] = [100, 200, 400];
 /** カーソルから線の縁までの許容距離(画面px) */
 export const HIT_PX = 8;

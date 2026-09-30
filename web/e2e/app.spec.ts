@@ -16,6 +16,7 @@ import {
 const CALIBRATION = /^線幅補正 (×[\d.]+|-)$/;
 const TYPE_ROW = /^種類: line {2}#\d+$/;
 const TYPE_ROW_SELECTED = /^種類: line {2}#\d+ {2}\(\d+件\)$/;
+const FILL_TYPE_ROW = /^種類: fill {2}#\d+$/;
 
 test.beforeAll(async () => {
   await generateFixtures();
@@ -30,7 +31,10 @@ test("PDFを開いて、凡例・線幅補正・ホバー・選択・ツール�
   await settle(ui);
   expect(await ui.page.title()).toBe("vectors.pdf - PDF Unit");
   expect(await text(ui, "pageInfo")).toBe("1 / 2 ページ");
-  expect(await text(ui, "legend")).toBe("line 22rect 3curve 6text 16image 0");
+  // pdf-lib の色を指定しない矩形は塗りと線の両方で描かれ、rect と fill の両方になる
+  expect(await text(ui, "legend")).toBe(
+    "line 22rect 3curve 6fill 2text 16image 0"
+  );
   expect(await text(ui, "status")).toMatch(CALIBRATION);
 
   const s = await state(ui);
@@ -48,6 +52,17 @@ test("PDFを開いて、凡例・線幅補正・ホバー・選択・ツール�
   await ui.page.keyboard.press("Escape");
   await settle(ui);
   expect((await state(ui)).selection).toBeNull();
+
+  // 塗りつぶしの矩形(40, 242)-(100, 282)の内側。線幅は示し、描画太さは示さない
+  await ui.page.mouse.move(
+    box.x + s.view.x + 70 * s.view.scale,
+    box.y + s.view.y + 262 * s.view.scale
+  );
+  await settle(ui);
+  const fillRows = await infoRows(ui);
+  expect(fillRows[0]).toMatch(FILL_TYPE_ROW);
+  expect(fillRows).toContain("線幅: 1");
+  expect(fillRows.some((r) => r.startsWith("描画太さ"))).toBe(false);
 
   await ui.page.getByRole("radio", { name: "ラスター" }).hover();
   await ui.page.waitForTimeout(400);

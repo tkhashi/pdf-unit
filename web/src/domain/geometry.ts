@@ -41,6 +41,58 @@ export const distPointSeg = (
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 };
 
+/**
+ * 閉じた折れ線群(塗りつぶしの範囲)の内側か。規則は PDF・Canvas と同じ(nonzero: 回転数が0でない、evenodd: 奇数)
+ */
+export const inPolylines = (
+  px: number,
+  py: number,
+  polylines: readonly (readonly number[])[],
+  rule: CanvasFillRule
+): boolean => {
+  let winding = 0;
+  for (const pl of polylines) {
+    for (let i = 0; i + 3 < pl.length; i += 2) {
+      const x0 = at(pl, i);
+      const y0 = at(pl, i + 1);
+      const x1 = at(pl, i + 2);
+      const y1 = at(pl, i + 3);
+      const side = (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0);
+      if (y0 <= py && y1 > py && side > 0) {
+        winding += 1;
+      } else if (y0 > py && y1 <= py && side < 0) {
+        winding -= 1;
+      }
+    }
+  }
+  return rule === "evenodd" ? winding % 2 !== 0 : winding !== 0;
+};
+
+/** 折れ線群までの距離 */
+export const distToPolylines = (
+  px: number,
+  py: number,
+  polylines: readonly (readonly number[])[]
+): number => {
+  let d = Number.POSITIVE_INFINITY;
+  for (const pl of polylines) {
+    for (let i = 0; i + 3 < pl.length; i += 2) {
+      d = Math.min(
+        d,
+        distPointSeg(
+          px,
+          py,
+          at(pl, i),
+          at(pl, i + 1),
+          at(pl, i + 2),
+          at(pl, i + 3)
+        )
+      );
+    }
+  }
+  return d;
+};
+
 /** 四隅の多角形までの距離(内側なら0)。回転画像ではbboxの角が画像外になるため */
 export const distToQuad = (
   px: number,

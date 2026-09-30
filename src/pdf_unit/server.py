@@ -30,7 +30,7 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
 from .calibration import calibrate_linewidth
-from .extract import extract_page_lines, extract_page_texts
+from .extract import extract_clip_paths, extract_page_fills, extract_page_lines, extract_page_texts
 from .pdfium_page import PdfiumPage, render_page
 from .raster import extract_images
 from .timing import Timings, add_metric, collect, metric, server_timing_header, stage
@@ -258,6 +258,8 @@ def page_lines(response: Response, data: bytes = Depends(pdf_body)) -> dict:
             page = PdfiumPage(pdf_page)  # 図形と文字の読み取り(内訳 parse.paths・parse.chars)
         with stage("vectors"):
             lines = extract_page_lines(page)
+            fills = extract_page_fills(page)
+            clip_paths = extract_clip_paths(page)
         with stage("calib"):
             # 報告linewidthと実描画太さの比(ハイライト幅を実際の線の太さに合わせるため)
             calib = calibrate_linewidth(page, page.lines + page.rects + page.curves)
@@ -269,6 +271,8 @@ def page_lines(response: Response, data: bytes = Depends(pdf_body)) -> dict:
         size = {"width": page.width, "height": page.height}
         metric("page_pt", f"{page.width:g}x{page.height:g}")
         metric("lines", len(lines))
+        metric("fills", len(fills))
+        metric("clip_paths", len(clip_paths))
         metric("texts", len(texts))
         metric("images", len(images))
     _set_timing_headers(response, timings)
@@ -277,6 +281,8 @@ def page_lines(response: Response, data: bytes = Depends(pdf_body)) -> dict:
         "linewidth_scale": calib.scale,
         "calibration": calib.method,
         "lines": lines,
+        "fills": fills,
+        "clip_paths": clip_paths,
         "texts": texts,
         "images": images,
     }

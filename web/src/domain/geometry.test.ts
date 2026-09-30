@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   distPointSeg,
   distToBox,
+  distToPolylines,
   distToQuad,
+  inPolylines,
   inQuad,
   insetQuad,
   quadMinSide,
@@ -22,6 +24,16 @@ describe("幾何", () => {
     expect(inQuad(11, 5, square)).toBe(false);
     expect(distToQuad(5, 5, square)).toBe(0);
     expect(distToQuad(13, 5, square)).toBe(3);
+  });
+
+  it("塗りの規則で、同じ向きに重ねた内側の範囲の扱いが変わる", () => {
+    const outer = [0, 0, 10, 0, 10, 10, 0, 10, 0, 0];
+    const inner = [3, 3, 7, 3, 7, 7, 3, 7, 3, 3];
+    expect(inPolylines(5, 5, [outer, inner], "nonzero")).toBe(true);
+    expect(inPolylines(5, 5, [outer, inner], "evenodd")).toBe(false);
+    expect(inPolylines(1, 5, [outer, inner], "evenodd")).toBe(true);
+    expect(inPolylines(11, 5, [outer, inner], "nonzero")).toBe(false);
+    expect(distToPolylines(5, 5, [outer, inner])).toBe(2);
   });
 
   it("枠までの距離", () => {

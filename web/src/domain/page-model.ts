@@ -4,7 +4,12 @@ import { at } from "./geometry";
 import type { Item, StrokeItem, TypeCounts } from "./items";
 import { shapeDescriptor } from "./shape";
 import { buildIndex, EMPTY_INDEX, type SpatialIndex } from "./spatial-index";
-import type { CalibrationMethod, LineRecord, LinesResponse } from "./types";
+import type {
+  CalibrationMethod,
+  ClipPathRecord,
+  LineRecord,
+  LinesResponse,
+} from "./types";
 
 /**
  * 1ページ分の要素。大きい(10万要素を超えることがある)ため、作成後は書き換えず参照で受け渡す
@@ -12,9 +17,11 @@ import type { CalibrationMethod, LineRecord, LinesResponse } from "./types";
  */
 export interface PageModel {
   readonly calibration: CalibrationMethod | null;
+  /** 塗りつぶしに掛かるクリップ(FillItem.clip の添字) */
+  readonly clipPaths: readonly ClipPathRecord[];
   readonly counts: TypeCounts;
   readonly index: SpatialIndex;
-  /** 線(line/rect/curve)・文字(text)・画像(image)の順の通し番号 = 配列の添字 */
+  /** 線(line/rect/curve)・文字(text)・画像(image)・塗りつぶし(fill)の順の通し番号 = 配列の添字 */
   readonly items: readonly Item[];
   /** 報告linewidth→実描画太さの補正係数 */
   readonly lwScale: number;
@@ -22,6 +29,7 @@ export interface PageModel {
 
 export const EMPTY_PAGE_MODEL: PageModel = {
   calibration: null,
+  clipPaths: [],
   counts: {},
   index: EMPTY_INDEX,
   items: [],
@@ -66,9 +74,16 @@ export const buildPageModel = (data: LinesResponse): PageModel => {
   const texts = data.texts.map((t, i) => ({ ...t, id: strokes.length + i }));
   const offset = strokes.length + texts.length;
   const images = data.images.map((im, i) => ({ ...im, id: offset + i }));
-  const items: readonly Item[] = [...strokes, ...texts, ...images];
+  // 塗りつぶしは後から加えた種類なので、既存の要素の番号を変えないよう最後に置く
+  const fills = data.fills.map((f, i) => ({
+    ...f,
+    clipPaths: f.clip.map((c) => data.clip_paths[c] as ClipPathRecord),
+    id: offset + images.length + i,
+  }));
+  const items: readonly Item[] = [...strokes, ...texts, ...images, ...fills];
   return {
     calibration: data.calibration,
+    clipPaths: data.clip_paths,
     counts: countTypes(items),
     index: buildIndex(items),
     items,

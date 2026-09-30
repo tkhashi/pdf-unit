@@ -1,4 +1,4 @@
-// /api/page/lines 等の応答の型。サーバー側の定義(extract.py の LineRecord・TextRecord・CharGlyph、
+// /api/page/lines 等の応答の型。サーバー側の定義(extract.py の LineRecord・FillRecord・TextRecord・CharGlyph、
 // raster.py の ImageRecord、server.py の各API)と対応する
 import type { StrokeType } from "./constants";
 
@@ -20,6 +20,33 @@ export interface LineRecord {
   /** ヒット判定用の折れ線群 [x0, y0, x1, y1, ...](ベジェは分割済み) */
   readonly polylines: readonly (readonly number[])[];
   readonly type: StrokeType;
+}
+
+/** 塗りつぶし(パスの塗りの範囲。ADR 0044) */
+export interface FillRecord {
+  /** クリップする前の範囲 */
+  readonly bbox: Bbox;
+  /** 掛かるクリップ(LinesResponse.clip_paths の添字)。塗られるのは範囲とすべてのクリップの共通部分(ADR 0046) */
+  readonly clip: readonly number[];
+  /** 塗りの色 */
+  readonly color: string | null;
+  /** SVG path data(全サブパス) */
+  readonly d: string;
+  readonly fill_rule: CanvasFillRule;
+  readonly id: number;
+  /** 塗るときに残っていた線幅(線としては描かれない) */
+  readonly linewidth: number | null;
+  /** ヒット判定用の閉じた折れ線群 [x0, y0, x1, y1, ...](ベジェは分割済み) */
+  readonly polylines: readonly (readonly number[])[];
+  readonly type: "fill";
+}
+
+/** 塗りつぶしに掛かるクリップ。塗りの規則は非ゼロ回転数とみなす(ADR 0046) */
+export interface ClipPathRecord {
+  /** SVG path data(空文字列は何も見えない範囲) */
+  readonly d: string;
+  /** ヒット判定用の閉じた折れ線群 */
+  readonly polylines: readonly (readonly number[])[];
 }
 
 export interface CharGlyph {
@@ -66,6 +93,8 @@ export type CalibrationMethod =
 
 export interface LinesResponse {
   readonly calibration: CalibrationMethod;
+  readonly clip_paths: readonly ClipPathRecord[];
+  readonly fills: readonly FillRecord[];
   readonly images: readonly ImageRecord[];
   readonly lines: readonly LineRecord[];
   readonly linewidth_scale: number;

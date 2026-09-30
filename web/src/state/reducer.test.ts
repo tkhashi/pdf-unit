@@ -56,7 +56,7 @@ describe("ページの読み込み", () => {
   });
 
   it("成功すると進捗を100%にし、少し後に消す", () => {
-    expect(loaded.page.progress).toMatchObject({ ratio: 1, stageIndex: 5 });
+    expect(loaded.page.progress).toMatchObject({ ratio: 1, stageIndex: 6 });
     const cleared = run([{ request: 1, type: "pageProgressCleared" }], loaded);
     expect(cleared.page.progress).toBeNull();
   });
@@ -194,7 +194,7 @@ describe("表示対象と選択", () => {
     const all = run([{ type: "allTypesToggled" }], one);
     expect([...all.visibility.hiddenTypes]).toEqual([]);
     const none = run([{ type: "allTypesToggled" }], all);
-    expect(none.visibility.hiddenTypes.size).toBe(5);
+    expect(none.visibility.hiddenTypes.size).toBe(6);
   });
 
   it("何もない所のクリックで解除、同じホバーは状態を変えない", () => {

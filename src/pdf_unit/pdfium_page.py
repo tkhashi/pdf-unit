@@ -2,7 +2,7 @@
 
 抽出処理(extract.py・calibration.py)は pdfplumber の Page と同じ形のデータ(`rects`・`curves`・`lines`・`chars`
 の dict と `width`・`height`・`to_image()`)を読む。以前は pdfplumber(pdfminer.six)で作っていたものを、同じ規則で
-PDFium から作る。
+PDFium から作る。ただし線を描かず塗るだけのパスは線として扱わず、塗りつぶし(`fills`)として分ける(ADR 0044)。
 
 座標: ページの表示範囲(CropBox と MediaBox の交わり。PDFium の描画・埋め込み画像の配置と同じ)の左上を原点とし、
 /Rotate を反映した pt。行列の掛け方と上原点への直し方は pdfminer/pdfplumber と同じ式にする。
@@ -102,11 +102,15 @@ class PdfiumPage:
         }.get(self.rotation, (1, 0, 0, 1, -x0, -y0))
         w, h = abs(x1 - x0), abs(y1 - y0)
         self.width, self.height = (h, w) if self.rotation in (90, 270) else (w, h)
-        objects: dict[str, list[dict[str, Any]]] = {"rect": [], "curve": [], "line": []}
+        objects: dict[str, list[dict[str, Any]]] = {"rect": [], "curve": [], "line": [], "fill": []}
+        # 塗りつぶしに掛かるクリップ(表示座標の path)。同じクリップを多数の図形が共有するので1つにまとめる
+        self.clip_paths: list[tuple] = []
+        self._clip_ids: dict[tuple, int] = {}
         with stage("parse.paths"):
-            for obj, forms in self._iter_paths():
-                self._add_path(obj, forms, objects)
+            for obj, forms, clips in self._iter_paths():
+                self._add_path(obj, forms, clips, objects)
         self.rects, self.curves, self.lines = objects["rect"], objects["curve"], objects["line"]
+        self.fills = objects["fill"]
         with stage("parse.chars"):
             self.chars = self._load_chars()
         metric("chars", len(self.chars))
@@ -127,22 +131,52 @@ class PdfiumPage:
 
     # ---- 図形 ----
 
-    def _iter_paths(self, form=None, forms: tuple[Matrix, ...] = (), level: int = 0):
+    def _iter_paths(self, form=None, forms: tuple[Matrix, ...] = (), clips: tuple[tuple, ...] = (), level: int = 0):
         for obj in self._page.get_objects(max_depth=0, form=form, level=level):
             if obj.type == pdfium_c.FPDF_PAGEOBJ_PATH:
-                yield obj, forms
+                yield obj, forms, clips
             elif obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:
-                # Form XObject 内の図形の行列はフォーム空間なので、外側のフォームの行列も掛ける
-                yield from self._iter_paths(obj, (*forms, self._matrix(obj.get_matrix())), level + 1)
+                # Form XObject 内の図形の行列はフォーム空間なので、外側のフォームの行列も掛ける。
+                # フォーム自体に掛かるクリップは中の図形の GetClipPath に含まれないので、ここで重ねていく
+                inner = (*clips, *self._clip_paths(obj, forms))
+                yield from self._iter_paths(obj, (*forms, self._matrix(obj.get_matrix())), inner, level + 1)
+
+    def _to_page(self, forms: tuple[Matrix, ...], m: Matrix = (1, 0, 0, 1, 0, 0)) -> Matrix:
+        """m に外側のフォームの行列(内側から順に)とページ行列を掛ける。"""
+        for fm in reversed(forms):
+            m = _mult(m, fm)
+        return _mult(m, self._page_ctm)
+
+    def _clip_paths(self, obj, forms: tuple[Matrix, ...]) -> tuple[tuple, ...]:
+        """オブジェクトのクリップ(表示座標の path の組。範囲はすべての共通部分)。
+
+        PDFium はクリップを CTM を掛けた後の座標(フォーム内ではフォームの座標)で返し、塗りの規則(`W`/`W*`)は
+        返さない。規則は非ゼロ回転数とみなす(ADR 0046)。
+        """
+        clip = pdfium_c.FPDFPageObj_GetClipPath(obj.raw)
+        if not clip:
+            return ()
+        m = self._to_page(forms)
+        paths = []
+        for i in range(pdfium_c.FPDFClipPath_CountPaths(clip)):
+            count = pdfium_c.FPDFClipPath_CountPathSegments(clip, i)
+            subpaths = self._segments(count, lambda j, i=i: pdfium_c.FPDFClipPath_GetPathSegment(clip, i, j))
+            paths.append(tuple((op[0], *(self._coord(_apply(m, p)) for p in op[1:])) for sp in subpaths for op in sp))
+        return tuple(paths)
 
     @staticmethod
     def _subpaths(obj) -> list[list[tuple]]:
+        return PdfiumPage._segments(pdfium_c.FPDFPath_CountSegments(obj.raw),
+                                    lambda i: pdfium_c.FPDFPath_GetPathSegment(obj.raw, i))
+
+    @staticmethod
+    def _segments(count: int, segment_at) -> list[list[tuple]]:
         """PDFium のセグメントを、サブパスごとの pdfminer 形式の path(m/l/c/h、未変換の座標)に直す。"""
         x, y = ctypes.c_float(), ctypes.c_float()
         subpaths: list[list[tuple]] = []
         bezier: list[tuple[float, float]] = []
-        for i in range(pdfium_c.FPDFPath_CountSegments(obj.raw)):
-            seg = pdfium_c.FPDFPath_GetPathSegment(obj.raw, i)
+        for i in range(max(count, 0)):
+            seg = segment_at(i)
             kind = pdfium_c.FPDFPathSegment_GetType(seg)
             pdfium_c.FPDFPathSegment_GetPoint(seg, x, y)
             p = (_decimal(x.value), _decimal(y.value))
@@ -164,21 +198,54 @@ class PdfiumPage:
                 path.append(("h",))
         return subpaths
 
-    def _add_path(self, obj, forms: tuple[Matrix, ...], out: dict[str, list[dict[str, Any]]]) -> None:
-        ctm = self._matrix(obj.get_matrix())
-        for fm in reversed(forms):
-            ctm = _mult(ctm, fm)
-        ctm = _mult(ctm, self._page_ctm)
+    def _add_path(self, obj, forms: tuple[Matrix, ...], clips: tuple[tuple, ...],
+                  out: dict[str, list[dict[str, Any]]]) -> None:
+        ctm = self._to_page(forms, self._matrix(obj.get_matrix()))
         w = ctypes.c_float()
         pdfium_c.FPDFPageObj_GetStrokeWidth(obj.raw, w)
         # 描画時の CTM の拡大率を掛けた、実際に描かれる太さ
         linewidth = _decimal(w.value) * (ctm[0] ** 2 + ctm[1] ** 2) ** 0.5
+        fill_mode, stroke = ctypes.c_int(), ctypes.c_int()
+        pdfium_c.FPDFPath_GetDrawMode(obj.raw, fill_mode, stroke)
+        subpaths = [path for path in self._subpaths(obj) if path[0][0] == "m"]
+        if fill_mode.value != pdfium_c.FPDF_FILLMODE_NONE:
+            clips = (*clips, *self._clip_paths(obj, forms))
+            self._add_fill(subpaths, ctm, linewidth, fill_mode.value, clips, obj, out)
+        # 塗るだけのパスは線を描かないので、線(line/rect/curve)にしない。その線幅は、塗るときに残っていた
+        # 太さで、描かれる線の太さではない(ADR 0044)
+        if not stroke.value and fill_mode.value != pdfium_c.FPDF_FILLMODE_NONE:
+            return
+        color = self._color(pdfium_c.FPDFPageObj_GetStrokeColor, obj)
+        for path in subpaths:
+            self._paint(path, ctm, linewidth, color, out)
+
+    @staticmethod
+    def _color(getter, obj) -> tuple[float, float, float]:
         r, g, b, a = (ctypes.c_uint() for _ in range(4))
-        pdfium_c.FPDFPageObj_GetStrokeColor(obj.raw, r, g, b, a)
-        color = (r.value / 255, g.value / 255, b.value / 255)
-        for path in self._subpaths(obj):
-            if path[0][0] == "m":
-                self._paint(path, ctm, linewidth, color, out)
+        getter(obj.raw, r, g, b, a)
+        return (r.value / 255, g.value / 255, b.value / 255)
+
+    def _add_fill(self, subpaths: list[list[tuple]], ctm: Matrix, linewidth: float, fill_mode: int,
+                  clips: tuple[tuple, ...], obj, out: dict[str, list[dict[str, Any]]]) -> None:
+        """塗りの範囲を1つにする。塗りの規則はパス全体(全サブパス)に掛かるため、サブパスごとに分けない。
+        clip はクリップの番号(clip_paths の添字)。実際に塗られるのは、範囲とすべてのクリップの共通部分(ADR 0046)。"""
+        if not subpaths:
+            return
+        path = [(op[0], *(self._coord(_apply(ctm, p)) for p in op[1:])) for sp in subpaths for op in sp]
+        out["fill"].append({
+            "object_type": "fill",
+            "linewidth": linewidth,
+            "non_stroking_color": self._color(pdfium_c.FPDFPageObj_GetFillColor, obj),
+            "fill_rule": "evenodd" if fill_mode == pdfium_c.FPDF_FILLMODE_ALTERNATE else "nonzero",
+            "path": path,
+            "clip": sorted({self._clip_id(c) for c in clips}),
+        })
+
+    def _clip_id(self, clip: tuple) -> int:
+        if clip not in self._clip_ids:
+            self._clip_ids[clip] = len(self.clip_paths)
+            self.clip_paths.append(clip)
+        return self._clip_ids[clip]
 
     def _paint(self, path: list[tuple], ctm: Matrix, linewidth: float, color, out) -> None:
         """1サブパスを line/rect/curve に分ける(pdfminer の PDFLayoutAnalyzer.paint_path と同じ規則)。"""
