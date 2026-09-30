@@ -1,7 +1,7 @@
 // サムネイル一覧: ブラウザ内(pdf.js の専用 Worker)でラスタライズする(ADR 0041)。
-// 文書を開いたら全ページを背景優先度で1ページずつ先読みし(Worker側で直列処理するため
-// メモリは1ページ分の作業領域に収まる)、IntersectionObserver で検知した表示範囲の
-// ページは優先度を上げて先に描画させる
+// 文書を開いたら全ページを背景優先度で1ページずつ先読みし(Worker側で直列処理し、描き終えた
+// ページの資源はすぐ捨てる。ADR 0048)、IntersectionObserver で検知した表示範囲の
+// ページは優先度を上げて先に描画させる。全ページ描き終えたら Worker 側の文書を閉じる(ADR 0050)
 import {
   THUMB_MAX_WIDTH,
   THUMB_RESOLUTION_SCALE,
@@ -10,6 +10,7 @@ import {
 import { thumbUnavailableTip } from "../domain/messages";
 import { devicePixelRatio } from "../render/dom";
 import {
+  closeThumbnailSource,
   renderThumb,
   reprioritizeThumb,
   THUMB_PRIORITY_BACKGROUND,
@@ -32,6 +33,8 @@ interface Tracking {
   /** 要求済み(背景で先読み中・描画中・描画済み・失敗確定)のページ */
   readonly requested: Set<number>;
   readonly session: DocumentSession | null;
+  /** 要求が確定した(描画済み・失敗確定)ページ */
+  readonly settled: Set<number>;
   /** 表示範囲内でまだ優先度を上げていないページ */
   readonly visible: Set<number>;
 }
@@ -54,7 +57,27 @@ export const createThumbnailScheduler = (
     observer: null,
     requested: new Set(),
     session: null,
+    settled: new Set(),
     visible: new Set(),
+  };
+
+  // 監視は要求が確定したときに解除する(成功・失敗のいずれも読み込みをやり直さない)。
+  // 全ページが確定したら同じ文書を描き直すことはないので、Worker が持つPDFとパース結果を解放する
+  const settle = (
+    tracking: Tracking,
+    target: DocumentSession,
+    page: number
+  ): void => {
+    const el = tracking.elements.get(page);
+    if (el) {
+      tracking.observer?.unobserve(el);
+    }
+    tracking.settled.add(page);
+    if (tracking.settled.size === target.pdf.getPageCount()) {
+      target.thumbSource.then(closeThumbnailSource, () => {
+        // 開けなかった文書は閉じる必要がない
+      });
+    }
   };
 
   const loadOne = async (
@@ -70,11 +93,7 @@ export const createThumbnailScheduler = (
       if (tracking !== t) {
         return;
       }
-      // 監視は要求が確定したときに解除する(成功・失敗のいずれも読み込みをやり直さない)
-      const el = tracking.elements.get(page);
-      if (el) {
-        tracking.observer?.unobserve(el);
-      }
+      settle(tracking, target, page);
       app.dispatch({
         docId: target.id,
         thumbs: [{ page, src }],
@@ -84,10 +103,7 @@ export const createThumbnailScheduler = (
       if (tracking !== t) {
         return;
       }
-      const el = tracking.elements.get(page);
-      if (el) {
-        tracking.observer?.unobserve(el);
-      }
+      settle(tracking, target, page);
       app.dispatch({
         docId: target.id,
         page,
@@ -147,6 +163,7 @@ export const createThumbnailScheduler = (
       observer,
       requested,
       session,
+      settled: new Set(),
       visible,
     };
     // 表示範囲を待たず、全ページを背景優先度で1ページずつ先読みする(Worker側で直列処理)

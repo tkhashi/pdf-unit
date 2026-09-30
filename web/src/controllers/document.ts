@@ -39,8 +39,9 @@ export const openFile = async (
     const pdf = await loadPdf(raw);
     const id = nextDocId;
     nextDocId += 1;
-    // 本体ページの表示を待たせないよう、サムネイル用 Worker の初期化は待たずに進める(ADR 0041)
-    const thumbSource = openThumbnailSource(new Uint8Array(raw));
+    // 本体ページの表示を待たせないよう、サムネイル用 Worker の初期化は待たずに進める(ADR 0041)。
+    // pdf-lib は読み込み時に必要なバイト列を複製して持つので、元のバイト列は複製せず Worker へ譲る(ADR 0051)
+    const thumbSource = openThumbnailSource(raw);
     session = {
       id,
       pageBody: createPageBodyCache(
