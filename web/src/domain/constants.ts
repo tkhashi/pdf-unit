@@ -69,6 +69,8 @@ export const PAGE_PDF_CACHE = 6;
 /** サムネイルの描画幅(ブラウザ内、pdf.js でラスタライズ。ADR 0041) */
 export const THUMB_WIDTH = 140;
 export const THUMB_MAX_WIDTH = 400;
+/** 表示幅は変えず、ラスタライズする実解像度だけ下げる係数(ADR 0047) */
+export const THUMB_RESOLUTION_SCALE = 0.5;
 export const TIP_DELAY_MS = 250;
 export const DEFAULT_RASTER_OPACITY = 20;
 /** 解析完了(擬似プログレスバーの100%表示)からバーを消すまでの一瞬の間(ms) */
