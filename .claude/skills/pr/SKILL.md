@@ -1,11 +1,13 @@
 ---
 name: pr
-description: 作業ブランチ(feat-/fix-/docs-)の変更から development 向けの PR を日本語で作成し、squash マージする。作業が完了して development に取り込むときに使う。main 向けの PR には使わない。
+description: 作業ブランチ(feat-/fix-/docs-)の変更から development 向けの PR を日本語で作成する。作業が完了して development に取り込むときに使う。main 向けの PR には使わない。マージはこのスキルの範囲外で、ユーザーが手元で確認し明示的に指示するまで行わない。
 ---
 
-# development 向け PR の作成とマージ
+# development 向け PR の作成
 
 ブランチ運用は README「開発の進め方」と ADR 0022 を参照。この手順は development への取り込み専用で、main(本番デプロイ)向けの PR は作らない。
+
+このスキルは PR の作成までを行う。マージはユーザーが手元で内容を確認し、明示的に指示したときのみ行う(手順4で終了し、続けてマージしない)。
 
 ## 1. 事前確認
 
@@ -48,7 +50,11 @@ rebase で既に push 済みの履歴を書き換えた場合は `git push --for
 gh pr create --base development --title "<種別>: <日本語の簡潔なタイトル>" --label <ラベル> --body-file <本文ファイル>
 ```
 
-## 5. マージ
+## 5. ここで終了(マージ待ち)
+
+PR の URL をユーザーに伝え、確認を待つ。ここでは止まらず続けてマージしない。
+
+ユーザーが内容を確認し、明示的にマージを指示したら以下を行う。
 
 ```sh
 gh pr merge --squash --delete-branch
@@ -56,4 +62,4 @@ git switch development
 git pull --ff-only
 ```
 
-マージ後、PR の URL をユーザーに伝える。main への反映(本番デプロイ)はユーザーの指示を待つ。指示を受けてリリース PR を作るときは、CLAUDE.md「バージョン」に従って `release` ラベル(軽微な変更だけなら `semver:patch` も)を付ける。
+main への反映(本番デプロイ)はさらに別の明示的な指示を待つ。指示を受けてリリース PR を作るときは、CLAUDE.md「バージョン」に従って `release` ラベル(軽微な変更だけなら `semver:patch` も)を付ける。
