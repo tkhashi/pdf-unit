@@ -74,6 +74,22 @@ describe("属性パネル", () => {
     });
   });
 
+  it("塗りつぶしは線幅を示し、描画太さは示さない", () => {
+    const fill = describeItem(m.items, item(6), null, m.lwScale);
+    expect(fill.map((r) => r.label)).toEqual([
+      "種類",
+      "線幅",
+      "色",
+      "濃淡",
+      "bbox",
+    ]);
+    expect(fill[1]?.value).toEqual({ kind: "plain", text: "2.5" });
+    // 線とは別の種類として巡回する(同じ線幅の線を含めない)
+    expect(cycle(6)).toEqual(["種類=fill:6,7", "線幅=2.5:6"]);
+    const clipped = describeItem(m.items, item(7), null, m.lwScale);
+    expect(clipped.map((r) => r.label)).toContain("クリップ");
+  });
+
   it("文字・画像の行", () => {
     const text = describeItem(m.items, item(4), null, m.lwScale);
     expect(text.map((r) => r.label)).toEqual([

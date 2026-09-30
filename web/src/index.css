@@ -1,9 +1,10 @@
 @import "tailwindcss";
-/* 使う部品だけを取り込む(ボタン・ボタン群・チェックボックス・スライダー) */
+/* 使う部品だけを取り込む(ボタン・ボタン群・チェックボックス・スライダー・スピナー・プログレスバー) */
 @plugin "daisyui" {
   themes: pdfunit --default;
   include:
-    button, join, checkbox, range, rootcolor, rootscrollgutter, properties;
+    button, join, checkbox, range, loading, progress, rootcolor,
+    rootscrollgutter, properties;
 }
 
 /* 画面全体の配色。ヘッダーは暗色、図面の周囲は明るい灰色 */

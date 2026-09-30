@@ -2,6 +2,7 @@
 import { ITEM_TYPES, type ItemType } from "../domain/constants";
 import { calibrationStatus, plainStatus } from "../domain/messages";
 import { EMPTY_PAGE_MODEL } from "../domain/page-model";
+import { estimatePlan, LAST_STAGE_INDEX } from "../domain/progress";
 import { filterSelection, selectNext } from "../domain/selection";
 import { fitView } from "../domain/view";
 import { hiddenPredicate, type Visibility } from "../domain/visibility";
@@ -57,6 +58,7 @@ const pageRequested: Handler<"pageRequested"> = (s, a) => {
   if (!size) {
     return s;
   }
+  const { primaryMs, tailMs } = estimatePlan(s.lastPageDurationMs);
   return {
     ...s,
     hovered: -1,
@@ -65,6 +67,7 @@ const pageRequested: Handler<"pageRequested"> = (s, a) => {
       index: a.index,
       loading: true,
       model: EMPTY_PAGE_MODEL,
+      progress: { primaryMs, ratio: 0, stageIndex: 0, tailMs },
       request: s.page.request + 1,
     },
     selection: null,
@@ -73,9 +76,33 @@ const pageRequested: Handler<"pageRequested"> = (s, a) => {
   };
 };
 
+const pageProgressTicked: Handler<"pageProgressTicked"> = (s, a) =>
+  a.request === s.page.request && s.page.progress
+    ? {
+        ...s,
+        page: {
+          ...s.page,
+          progress: {
+            ...s.page.progress,
+            ratio: a.ratio,
+            stageIndex: a.stageIndex,
+          },
+        },
+      }
+    : s;
+
 const pageLoadSettled: Handler<"pageLoadSettled"> = (s, a) =>
   a.request === s.page.request
-    ? { ...s, page: { ...s.page, loading: false } }
+    ? {
+        ...s,
+        lastPageDurationMs: a.durationMs,
+        page: { ...s.page, loading: false },
+      }
+    : s;
+
+const pageProgressCleared: Handler<"pageProgressCleared"> = (s, a) =>
+  a.request === s.page.request && s.page.progress
+    ? { ...s, page: { ...s.page, progress: null } }
     : s;
 
 // 座標系の基準はサーバー(PDFium)の寸法。pdf-libで求めた寸法と食い違えば合わせる
@@ -107,7 +134,13 @@ const pageLoaded: Handler<"pageLoaded"> = (s, a) => {
   return {
     ...s,
     legendCounts: model.counts,
-    page: { ...s.page, model },
+    page: {
+      ...s.page,
+      model,
+      progress: s.page.progress
+        ? { ...s.page.progress, ratio: 1, stageIndex: LAST_STAGE_INDEX }
+        : null,
+    },
     status: model.calibration
       ? calibrationStatus(model.calibration, model.lwScale)
       : s.status,
@@ -116,7 +149,11 @@ const pageLoaded: Handler<"pageLoaded"> = (s, a) => {
 
 const pageFailed: Handler<"pageFailed"> = (s, a) =>
   a.request === s.page.request
-    ? { ...s, status: plainStatus(`エラー: ${a.message}`) }
+    ? {
+        ...s,
+        page: { ...s.page, progress: null },
+        status: plainStatus(`エラー: ${a.message}`),
+      }
     : s;
 
 const clicked: Handler<"clicked"> = (s, a) => ({
@@ -215,6 +252,8 @@ const handlers: { readonly [T in Action["type"]]: Handler<T> } = {
   pageFailed,
   pageLoaded,
   pageLoadSettled,
+  pageProgressCleared,
+  pageProgressTicked,
   pageRequested,
   pageSizeReported,
   rasterOpacityChanged: (s, a) => ({ ...s, rasterOpacity: a.value }),

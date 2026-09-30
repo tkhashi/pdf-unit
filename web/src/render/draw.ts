@@ -1,6 +1,7 @@
 // Canvas への描画(旧 index.html の drawScene / drawHighlights と同じ手順)
 import {
   DIM_ALPHA,
+  FILL_ALPHA,
   GROUP_COLOR,
   HL_PAD_MAX_PX,
   HL_PAD_MIN_PX,
@@ -9,7 +10,14 @@ import {
   TYPE_COLORS,
 } from "../domain/constants";
 import { at, insetQuad, quadMinSide } from "../domain/geometry";
-import { type Item, isImage, isText, type TextItem } from "../domain/items";
+import {
+  type FillItem,
+  type Item,
+  isFill,
+  isImage,
+  isText,
+  type TextItem,
+} from "../domain/items";
 import type { PageModel } from "../domain/page-model";
 import type { Selection } from "../domain/selection";
 import type { PageSize } from "../domain/types";
@@ -103,6 +111,76 @@ const strokeImageFrames = (
   ctx.stroke(region);
 };
 
+// 塗りつぶしの描画(塗り・縁取り)は、原本と同じくクリップの内側だけに行う(ADR 0046)
+const withinClip = (
+  ctx: CanvasRenderingContext2D,
+  it: FillItem,
+  input: SceneInput,
+  draw: () => void
+): void => {
+  if (it.clip.length === 0) {
+    draw();
+    return;
+  }
+  ctx.save();
+  for (const c of it.clip) {
+    const clip = input.resources.clipPaths[c];
+    if (clip) {
+      ctx.clip(clip);
+    }
+  }
+  draw();
+  ctx.restore();
+};
+
+// 塗りつぶしは本来の色(白地を隠す白など)ではなく種類の色で、下が透ける濃さで塗る。
+// 塗りの規則は要素ごとに異なり、まとめると重なりの扱いが変わるため1件ずつ塗る(ADR 0044)
+const paintFill = (
+  ctx: CanvasRenderingContext2D,
+  it: FillItem,
+  input: SceneInput
+): void => {
+  const path = input.resources.paths[it.id];
+  if (path) {
+    withinClip(ctx, it, input, () => ctx.fill(path, it.fill_rule));
+  }
+};
+
+const drawFills = (
+  ctx: CanvasRenderingContext2D,
+  input: SceneInput,
+  alpha: number
+): void => {
+  if (input.isHidden("fill")) {
+    return;
+  }
+  ctx.globalAlpha = alpha * FILL_ALPHA;
+  ctx.fillStyle = TYPE_COLORS.fill;
+  for (const it of input.model.items) {
+    if (isFill(it)) {
+      paintFill(ctx, it, input);
+    }
+  }
+  ctx.globalAlpha = alpha;
+};
+
+/** 塗りつぶしの範囲の縁取り(小さな範囲でも見えるよう、縁の外側にも pad だけはみ出す) */
+const outlineFill = (
+  ctx: CanvasRenderingContext2D,
+  it: FillItem,
+  color: string,
+  input: SceneInput
+): void => {
+  const path = input.resources.paths[it.id];
+  if (!path) {
+    return;
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth =
+    2 * highlightPad(input.view.scale, HL_PAD_MIN_PX, HL_PAD_MAX_PX);
+  withinClip(ctx, it, input, () => ctx.stroke(path));
+};
+
 const strokeBatches = (
   ctx: CanvasRenderingContext2D,
   batches: readonly StrokeBatch[],
@@ -129,12 +207,14 @@ export const drawScene = (
   }
   const { items } = input.model;
   pageTransform(ctx, input);
-  ctx.globalAlpha = input.selection ? DIM_ALPHA : 1;
+  const alpha = input.selection ? DIM_ALPHA : 1;
+  ctx.globalAlpha = alpha;
   const regions = input.resources.imageRegions;
   if (regions && !input.isHidden("image")) {
     drawOriginalIn(ctx, regions, input);
     strokeImageFrames(ctx, regions, input);
   }
+  drawFills(ctx, input, alpha);
   ctx.lineCap = "butt";
   ctx.lineJoin = "miter";
   strokeBatches(ctx, input.resources.strokeBatches, input, true);
@@ -181,6 +261,12 @@ const highlightItem = (
     ctx.stroke();
     return;
   }
+  if (isFill(it)) {
+    ctx.fillStyle = color;
+    paintFill(ctx, it, input);
+    outlineFill(ctx, it, color, input);
+    return;
+  }
   if (isText(it)) {
     const [x0, top, x1, bottom] = it.bbox;
     ctx.fillStyle = color;
@@ -208,18 +294,30 @@ const drawGroup = (
 ): void => {
   const pad = highlightPad(input.view.scale, HL_PAD_MIN_PX, HL_PAD_MAX_PX);
   // 画像は範囲の原本画像を減光前の濃さで先に描き直し、その上に枠を重ねる。
-  // 線・文字は縁取り(黄)を先に描き、その上に減光前の本来の色で描き直す
+  // 線・文字・塗りつぶしは縁取り(黄)を先に描き、その上に減光前の色で描き直す
   const images = imageRegionsOf(group.areas);
   if (images) {
     drawOriginalIn(ctx, images, input);
   }
+  const fills = group.areas.filter(isFill);
+  for (const it of fills) {
+    outlineFill(ctx, it, GROUP_COLOR, input);
+  }
+  ctx.globalAlpha = FILL_ALPHA;
+  ctx.fillStyle = TYPE_COLORS.fill;
+  for (const it of fills) {
+    paintFill(ctx, it, input);
+  }
+  ctx.globalAlpha = 1;
   ctx.strokeStyle = GROUP_COLOR;
   for (const b of group.strokes) {
     ctx.lineWidth = b.w + 2 * pad;
     ctx.stroke(b.path);
   }
   for (const it of group.areas) {
-    highlightItem(ctx, it, GROUP_COLOR, input);
+    if (!isFill(it)) {
+      highlightItem(ctx, it, GROUP_COLOR, input);
+    }
   }
   ctx.lineCap = "butt";
   ctx.lineJoin = "miter";

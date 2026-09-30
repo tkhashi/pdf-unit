@@ -41,8 +41,53 @@ describe("ページの読み込み", () => {
       next
     );
     expect(
-      run([{ request: 2, type: "pageLoadSettled" }], next).page.loading
+      run([{ durationMs: 10, request: 2, type: "pageLoadSettled" }], next).page
+        .loading
     ).toBe(false);
+  });
+
+  it("応答受信では進捗を変えず、実測時間だけ次回の見積もりに残す", () => {
+    const settled = run(
+      [{ durationMs: 1234, request: 1, type: "pageLoadSettled" }],
+      opened
+    );
+    expect(settled.page.progress).not.toBeNull();
+    expect(settled.lastPageDurationMs).toBe(1234);
+  });
+
+  it("成功すると進捗を100%にし、少し後に消す", () => {
+    expect(loaded.page.progress).toMatchObject({ ratio: 1, stageIndex: 6 });
+    const cleared = run([{ request: 1, type: "pageProgressCleared" }], loaded);
+    expect(cleared.page.progress).toBeNull();
+  });
+
+  it("失敗すると進捗を即座に消す", () => {
+    const failed = run(
+      [{ message: "x", request: 1, type: "pageFailed" }],
+      opened
+    );
+    expect(failed.page.progress).toBeNull();
+  });
+
+  it("進捗の更新は現在の要求のものだけ反映する", () => {
+    const ticked = run(
+      [{ ratio: 0.5, request: 1, stageIndex: 2, type: "pageProgressTicked" }],
+      opened
+    );
+    expect(ticked.page.progress).toMatchObject({ ratio: 0.5, stageIndex: 2 });
+    expect(
+      run(
+        [
+          {
+            ratio: 0.9,
+            request: 999,
+            stageIndex: 5,
+            type: "pageProgressTicked",
+          },
+        ],
+        opened
+      )
+    ).toBe(opened);
   });
 
   it("サーバーのページ寸法と食い違えば合わせて全体表示し直す", () => {
@@ -149,7 +194,7 @@ describe("表示対象と選択", () => {
     const all = run([{ type: "allTypesToggled" }], one);
     expect([...all.visibility.hiddenTypes]).toEqual([]);
     const none = run([{ type: "allTypesToggled" }], all);
-    expect(none.visibility.hiddenTypes.size).toBe(5);
+    expect(none.visibility.hiddenTypes.size).toBe(6);
   });
 
   it("何もない所のクリックで解除、同じホバーは状態を変えない", () => {

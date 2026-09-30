@@ -1,8 +1,10 @@
 // クリックで辿る属性(種類ごと)
 import { shade } from "./color";
 import {
+  type FillItem,
   type ImageItem,
   type Item,
+  isFill,
   isImage,
   isText,
   type StrokeItem,
@@ -44,6 +46,17 @@ const strokeLevels: readonly Level<StrokeItem>[] = [
   { key: (it) => shade(it.color), label: "濃淡" },
 ];
 
+// 塗りつぶしは線を描かないので描画太さは無い。線幅は塗るときに残っていた値をそのまま示す
+const fillLevels: readonly Level<FillItem>[] = [
+  { key: (it) => it.type, label: "種類" },
+  {
+    key: (it) => (it.linewidth === null ? null : String(it.linewidth)),
+    label: "線幅",
+  },
+  { key: (it) => it.color, label: "色" },
+  { key: (it) => shade(it.color), label: "濃淡" },
+];
+
 const textLevels: readonly Level<TextItem>[] = [
   { key: (it) => it.type, label: "種類" },
   { key: (it) => it.fontname, label: "フォント" },
@@ -61,6 +74,7 @@ const imageLevels: readonly Level<ImageItem>[] = [
 
 // 表の同一性(===)で要素の種類が同じかを判定するため、表は定数のまま使う
 export const STROKE_LEVELS = strokeLevels as readonly Level[];
+export const FILL_LEVELS = fillLevels as readonly Level[];
 export const TEXT_LEVELS = textLevels as readonly Level[];
 export const IMAGE_LEVELS = imageLevels as readonly Level[];
 
@@ -70,6 +84,9 @@ export const levelsOf = (it: Item): readonly Level[] => {
   }
   if (isText(it)) {
     return TEXT_LEVELS;
+  }
+  if (isFill(it)) {
+    return FILL_LEVELS;
   }
   return STROKE_LEVELS;
 };

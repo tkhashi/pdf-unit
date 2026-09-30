@@ -1,7 +1,14 @@
 // ヒット判定用: 線分 + 空間インデックス(値 >=0: 線分index, <0: -(面要素のid+1))
 import { AREA_PENALTY, CELL, HIT_PX, type ItemType } from "./constants";
-import { at, distPointSeg, distToBox, distToQuad } from "./geometry";
-import { type Item, isArea, isImage } from "./items";
+import {
+  at,
+  distPointSeg,
+  distToBox,
+  distToPolylines,
+  distToQuad,
+  inPolylines,
+} from "./geometry";
+import { type AreaItem, type Item, isArea, isFill, isImage } from "./items";
 
 export interface SpatialIndex {
   readonly grid: ReadonlyMap<number, readonly number[]>;
@@ -79,6 +86,25 @@ export const buildIndex = (items: readonly Item[]): SpatialIndex => {
 
 export const EMPTY_INDEX: SpatialIndex = buildIndex([]);
 
+/** 面の要素までの距離(内側なら0) */
+const distToArea = (it: AreaItem, px: number, py: number): number => {
+  if (isImage(it)) {
+    return distToQuad(px, py, it.quad);
+  }
+  if (isFill(it)) {
+    // クリップの外は塗られないので選ばない(ADR 0046)
+    if (
+      !it.clipPaths.every((c) => inPolylines(px, py, c.polylines, "nonzero"))
+    ) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return inPolylines(px, py, it.polylines, it.fill_rule)
+      ? 0
+      : distToPolylines(px, py, it.polylines);
+  }
+  return distToBox(px, py, it.bbox);
+};
+
 /** 候補のスコア(小さいほど優先)。許容距離外・非表示なら Infinity */
 const scoreOf = (
   it: Item,
@@ -93,9 +119,7 @@ const scoreOf = (
     return Number.POSITIVE_INFINITY;
   }
   if (isArea(it)) {
-    const d = isImage(it)
-      ? distToQuad(px, py, it.quad)
-      : distToBox(px, py, it.bbox);
+    const d = distToArea(it, px, py);
     return d > tol ? Number.POSITIVE_INFINITY : d + tol * AREA_PENALTY[it.type];
   }
   const s = index.segs;
@@ -113,7 +137,8 @@ const scoreOf = (
 /**
  * 候補: 線の縁(描画太さ込み)まで許容距離以内。その中で中心線に最も近いものを選ぶ
  * (描画上重なって見える極細の密集線でも、中心線の近さで1本に決まる)。
- * 文字・画像は枠内でもペナルティを付け、重なる線を優先する(画像は四隅の多角形で判定)。
+ * 文字・画像・塗りつぶしは枠内でもペナルティを付け、重なる線を優先する(画像は四隅の多角形、
+ * 塗りつぶしは塗りの範囲で判定し、クリップの外は選ばない)。
  * 見つからなければ -1。
  */
 export const pick = (

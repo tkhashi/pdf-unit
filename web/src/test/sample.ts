@@ -3,6 +3,41 @@ import type { LinesResponse } from "../domain/types";
 
 export const sampleLines = (): LinesResponse => ({
   calibration: "measured",
+  clip_paths: [
+    {
+      d: "M300 100 H360 V130 H300 Z",
+      polylines: [[300, 100, 360, 100, 360, 130, 300, 130, 300, 100]],
+    },
+  ],
+  fills: [
+    {
+      bbox: [300, 20, 360, 80],
+      clip: [],
+      color: "rgb(255,255,255)",
+      // 穴のある範囲(偶奇規則)
+      d: "M300 20 H360 V80 H300 Z M320 40 H340 V60 H320 Z",
+      fill_rule: "evenodd",
+      id: 0,
+      linewidth: 2.5,
+      polylines: [
+        [300, 20, 360, 20, 360, 80, 300, 80, 300, 20],
+        [320, 40, 340, 40, 340, 60, 320, 60, 320, 40],
+      ],
+      type: "fill",
+    },
+    {
+      // クリップで y 100〜130 だけが塗られる範囲
+      bbox: [300, 90, 360, 150],
+      clip: [0],
+      color: "rgb(214,214,214)",
+      d: "M300 90 H360 V150 H300 Z",
+      fill_rule: "nonzero",
+      id: 1,
+      linewidth: 1,
+      polylines: [[300, 90, 360, 90, 360, 150, 300, 150, 300, 90]],
+      type: "fill",
+    },
+  ],
   images: [
     {
       bbox: [200, 200, 260, 240],

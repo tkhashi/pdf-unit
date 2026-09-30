@@ -1,6 +1,6 @@
 // 属性パネルの行。クリック巡回の属性定義から作る。選択中の属性で、表示中の要素がその集合に含まれれば行を強調する
 import type { ItemType } from "./constants";
-import { type Item, isImage, isText } from "./items";
+import { type Item, isFill, isImage, isText } from "./items";
 import { levelsOf } from "./levels";
 import type { Selection } from "./selection";
 
@@ -79,6 +79,9 @@ export const describe = (
     const count =
       i === activeLevel && selection ? selection.members.length : null;
     rows.push(row(label, levelValue(it, label, value, lwScale), count));
+  }
+  if (isFill(it) && it.clip.length > 0) {
+    rows.push(row("クリップ", plain("あり(クリップの内側だけ塗られる)")));
   }
   if (isImage(it)) {
     rows.push(

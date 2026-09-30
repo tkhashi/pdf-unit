@@ -4,6 +4,7 @@ import { useAppController, useAppState } from "../app/app-context";
 import { Viewport } from "../components/viewport";
 import { currentPageSize } from "../state/state";
 import { InfoPanelContainer } from "./info-panel-container";
+import { PageProgressContainer } from "./page-progress-container";
 
 export const ViewportContainer = () => {
   const { attachViewport, dom, refs } = useAppController();
@@ -32,6 +33,7 @@ export const ViewportContainer = () => {
       viewportRef={refs.viewport}
     >
       <InfoPanelContainer />
+      <PageProgressContainer />
     </Viewport>
   );
 };
