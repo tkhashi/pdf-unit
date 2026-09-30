@@ -2,7 +2,11 @@
 // 文書を開いたら全ページを背景優先度で1ページずつ先読みし(Worker側で直列処理するため
 // メモリは1ページ分の作業領域に収まる)、IntersectionObserver で検知した表示範囲の
 // ページは優先度を上げて先に描画させる
-import { THUMB_MAX_WIDTH, THUMB_WIDTH } from "../domain/constants";
+import {
+  THUMB_MAX_WIDTH,
+  THUMB_RESOLUTION_SCALE,
+  THUMB_WIDTH,
+} from "../domain/constants";
 import { thumbUnavailableTip } from "../domain/messages";
 import { devicePixelRatio } from "../render/dom";
 import {
@@ -36,7 +40,10 @@ const pageOf = (el: Element): number =>
   Number((el as HTMLElement).dataset.page);
 
 const thumbWidth = (): number =>
-  Math.min(THUMB_MAX_WIDTH, Math.round(THUMB_WIDTH * devicePixelRatio()));
+  Math.round(
+    Math.min(THUMB_MAX_WIDTH, THUMB_WIDTH * devicePixelRatio()) *
+      THUMB_RESOLUTION_SCALE
+  );
 
 export const createThumbnailScheduler = (
   ctx: ControllerContext
