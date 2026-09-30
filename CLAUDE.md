@@ -18,7 +18,7 @@
 
 - ファイル操作を伴う作業は必ず `git worktree` で専用の作業ディレクトリを作ってから行う。置き場所は `~/.claude/worktrees/pdf-unit-<branch名>` とし(リポジトリ内の `.claude/worktrees/` や、リポジトリの隣には作らない)、`development` を主ブランチのワークツリーに直接チェックアウトせず、`git worktree add ~/.claude/worktrees/pdf-unit-<branch名> -b <branch名> origin/development` のように `development` から分岐させる。作業が終わってマージしたら、自分が作った worktree とブランチは削除する
 - 作業を始めるときは `development` から `feat-`/`fix-`/`docs-` + 英小文字・数字・ハイフンの名前でブランチを作る(例: `feat-thumbnail-cache`)。`main`・`development` に直接コミット・push しない
-- 作業が終わったら `/pr` skill(`.claude/skills/pr/SKILL.md`)で `development` 向けの PR を作成し、squash マージする
+- 作業が終わったら `/pr` skill(`.claude/skills/pr/SKILL.md`)で `development` 向けの PR を作成する。マージはユーザーが手元で PR 内容を確認し、明示的に指示したときのみ(`gh pr merge --squash --delete-branch`)行う。PR 作成後は指示を待って止まる
 - `main` へのマージは本番デプロイになる。ユーザーが明示的に指示したときのみ、`gh pr create --base main --head development` → `gh pr merge --merge` で行う
 - PR のタイトルはコミットと同じ形式(`feat:` 等 + 日本語)、本文は `.github/pull_request_template.md` に沿って日本語で簡潔に書く
 - `.claude/hooks/guard-git.sh` がこれらに反する操作を拒否・確認する。フックに止められたら迂回せず、ルールに沿ったやり方に直す(README「開発の進め方」、ADR 0022)
