@@ -191,7 +191,7 @@ const handleRender = async (job: RenderJob): Promise<void> => {
     } satisfies OutMessage);
   } finally {
     // pdf.js は描画したページの命令列(Path2D を含む)と画像を、cleanup() を呼ぶまでページごとに保持し続ける。
-    // 同じページを描き直すことはないので、描き終えたら捨てる(ADR 0047)
+    // 同じページを描き直すことはないので、描き終えたら捨てる(ADR 0048)
     page?.cleanup();
   }
 };
@@ -200,7 +200,7 @@ const handleClose = (job: CloseJob): void => {
   tasks.get(job.docId)?.destroy();
   tasks.delete(job.docId);
   // 閉じた文書の未着手ジョブ(先読み分)はもう不要。ただし応答しないと、要求元の Promise が解決されない。
-  // その Promise が閉じた文書全体を参照し続けてしまうため、失敗として答えてから捨てる(ADR 0048)
+  // その Promise が閉じた文書全体を参照し続けてしまうため、失敗として答えてから捨てる(ADR 0049)
   const remaining: RenderJob[] = [];
   for (const j of queue) {
     if (j.docId === job.docId) {

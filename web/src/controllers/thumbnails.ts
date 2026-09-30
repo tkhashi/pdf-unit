@@ -1,7 +1,7 @@
 // サムネイル一覧: ブラウザ内(pdf.js の専用 Worker)でラスタライズする(ADR 0041)。
 // 文書を開いたら全ページを背景優先度で1ページずつ先読みし(Worker側で直列処理し、描き終えた
-// ページの資源はすぐ捨てる。ADR 0047)、IntersectionObserver で検知した表示範囲の
-// ページは優先度を上げて先に描画させる。全ページ描き終えたら Worker 側の文書を閉じる(ADR 0049)
+// ページの資源はすぐ捨てる。ADR 0048)、IntersectionObserver で検知した表示範囲の
+// ページは優先度を上げて先に描画させる。全ページ描き終えたら Worker 側の文書を閉じる(ADR 0050)
 import { THUMB_MAX_WIDTH, THUMB_WIDTH } from "../domain/constants";
 import { thumbUnavailableTip } from "../domain/messages";
 import { devicePixelRatio } from "../render/dom";

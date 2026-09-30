@@ -40,7 +40,7 @@ export const openFile = async (
     const id = nextDocId;
     nextDocId += 1;
     // 本体ページの表示を待たせないよう、サムネイル用 Worker の初期化は待たずに進める(ADR 0041)。
-    // pdf-lib は読み込み時に必要なバイト列を複製して持つので、元のバイト列は複製せず Worker へ譲る(ADR 0050)
+    // pdf-lib は読み込み時に必要なバイト列を複製して持つので、元のバイト列は複製せず Worker へ譲る(ADR 0051)
     const thumbSource = openThumbnailSource(raw);
     session = {
       id,

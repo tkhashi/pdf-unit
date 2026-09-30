@@ -71,7 +71,7 @@ const ensureWorker = (): Worker => {
 
 /**
  * 文書を開く。以後この文書のページは source を使って renderThumb で描画できる。
- * data は複製せずに Worker へ転送する(大きいPDFで複製を増やさないため。呼び出し後の data は空になる。ADR 0050)
+ * data は複製せずに Worker へ転送する(大きいPDFで複製を増やさないため。呼び出し後の data は空になる。ADR 0051)
  */
 export const openThumbnailSource = (
   data: ArrayBuffer

@@ -1,4 +1,4 @@
-# ADR 0047: サムネイルを描いたページは pdf.js の後始末(`page.cleanup()`)を呼んで捨てる
+# ADR 0048: サムネイルを描いたページは pdf.js の後始末(`page.cleanup()`)を呼んで捨てる
 
 - ステータス: 採用
 - 日付: 2026-10-01
@@ -16,7 +16,7 @@ Worker のヒープスナップショットを見ると、`Path2D` が60万個(3
 ## 決定
 
 - `thumbnail-worker.ts` の `handleRender` で、ページを描き終えたら(失敗した場合も)`page.cleanup()` を呼ぶ
-- 文書全体の `doc.cleanup()`(フォント・複数ページで共有する画像のキャッシュ)は呼ばない。描画中に呼ぶと描画が壊れうるため。文書ごとの資源は、先読みが終わった時点で文書ごと閉じて解放する([0049](0049-close-thumbnail-document-after-prefetch.md))
+- 文書全体の `doc.cleanup()`(フォント・複数ページで共有する画像のキャッシュ)は呼ばない。描画中に呼ぶと描画が壊れうるため。文書ごとの資源は、先読みが終わった時点で文書ごと閉じて解放する([0050](0050-close-thumbnail-document-after-prefetch.md))
 
 ## 理由
 

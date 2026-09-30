@@ -1,11 +1,11 @@
-# ADR 0049: 全ページのサムネイルが確定したら、Worker 側の文書を閉じる
+# ADR 0050: 全ページのサムネイルが確定したら、Worker 側の文書を閉じる
 
 - ステータス: 採用
 - 日付: 2026-10-01
 
 ## コンテキスト
 
-[0047](0047-thumbnail-worker-page-cleanup.md)・[0048](0048-thumbnail-close-answers-dropped-jobs.md) の後も、同じ合成PDF(73MB・30ページ)を開くと、先読みが終わった後の Worker のヒープは 79MB だった。そのほとんどは、[0041](0041-thumbnail-client-side-rendering.md) で Worker に渡したPDFの複製(ファイルと同じ大きさ)と、pdf.js のパース結果(フォント等)である。
+[0048](0048-thumbnail-worker-page-cleanup.md)・[0049](0049-thumbnail-close-answers-dropped-jobs.md) の後も、同じ合成PDF(73MB・30ページ)を開くと、先読みが終わった後の Worker のヒープは 79MB だった。そのほとんどは、[0041](0041-thumbnail-client-side-rendering.md) で Worker に渡したPDFの複製(ファイルと同じ大きさ)と、pdf.js のパース結果(フォント等)である。
 
 サムネイルは1ページにつき1回しか要求しない。成功しても失敗しても再要求しない。そのため全ページの要求が確定した後は、Worker 側の文書は使われないまま、文書を切り替えるまで残っていた。
 
