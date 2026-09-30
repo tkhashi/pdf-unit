@@ -18,6 +18,7 @@
 
 - ファイル操作を伴う作業は必ず `git worktree` で専用の作業ディレクトリを作ってから行う。置き場所は `~/.claude/worktrees/pdf-unit-<branch名>` とし(リポジトリ内の `.claude/worktrees/` や、リポジトリの隣には作らない)、`development` を主ブランチのワークツリーに直接チェックアウトせず、`git worktree add ~/.claude/worktrees/pdf-unit-<branch名> -b <branch名> origin/development` のように `development` から分岐させる
 - 作業を始めるときは `development` から `feat-`/`fix-`/`docs-` + 英小文字・数字・ハイフンの名前でブランチを作る(例: `feat-thumbnail-cache`)。`main`・`development` に直接コミット・push しない
+- PR を作成する直前、および作成済みの PR を更新する前には `git fetch origin development` してから `git rebase origin/development` する。他セッションが先行して development へマージした変更を取り込まずに PR を作成・更新すると、レビューやマージ時のコンフリクト解消で意図せず先行変更を上書きしかねないため。コンフリクトが出たら自動解決せず、両方の変更を確認したうえで手で解決する
 - PR が development へマージされたら、対応する worktree とローカルブランチを削除する。自分が今のセッションで作ったものに限らず、`~/.claude/worktrees/` 配下に残っている他の worktree に気づいたときも、対応する PR がマージ済みか確認できたら同様に削除する(squash マージはローカルの `git branch -d` では「fully merged」と検出されないため、`gh pr view <番号> --json state,mergedAt` 等でマージ済みと確認したうえで `git worktree remove` → `git branch -D` で消す)。PR がまだ open の worktree には触れない
 - 作業が終わったら `/pr` skill(`.claude/skills/pr/SKILL.md`)で `development` 向けの PR を作成する。マージはユーザーが手元で PR 内容を確認し、明示的に指示したときのみ(`gh pr merge --squash --delete-branch`)行う。PR 作成後は指示を待って止まる
 - `main` へのマージは本番デプロイになる。ユーザーが明示的に指示したときのみ、`gh pr create --base main --head development` → `gh pr merge --merge` で行う
