@@ -5,6 +5,7 @@ import {
   GlobalWorkerOptions,
   getDocument,
   type PDFDocumentLoadingTask,
+  type PDFPageProxy,
 } from "pdfjs-dist";
 // Vite の ?url でビルド時に発行された URL を取る
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
@@ -152,13 +153,14 @@ const handleOpen = async (job: OpenJob): Promise<void> => {
 };
 
 const handleRender = async (job: RenderJob): Promise<void> => {
+  let page: PDFPageProxy | null = null;
   try {
     const task = tasks.get(job.docId);
     if (!task) {
       throw new Error("document not open");
     }
     const doc = await task.promise;
-    const page = await doc.getPage(job.page + 1);
+    page = await doc.getPage(job.page + 1);
     const unscaled = page.getViewport({ scale: 1 });
     const viewport = page.getViewport({ scale: job.width / unscaled.width });
     const canvas = new OffscreenCanvas(
@@ -187,6 +189,10 @@ const handleRender = async (job: RenderJob): Promise<void> => {
       kind: "render-error",
       reqId: job.reqId,
     } satisfies OutMessage);
+  } finally {
+    // pdf.js は描画したページの命令列(Path2D を含む)と画像を、cleanup() を呼ぶまでページごとに保持し続ける。
+    // 同じページを描き直すことはないので、描き終えたら捨てる(ADR 0047)
+    page?.cleanup();
   }
 };
 
