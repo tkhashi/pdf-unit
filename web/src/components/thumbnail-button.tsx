@@ -4,6 +4,7 @@ import type { PageSize } from "../domain/types";
 
 interface Props {
   readonly current: boolean;
+  readonly loading: boolean;
   readonly onSelect: (page: number) => void;
   readonly page: number;
   readonly ref: Ref<HTMLButtonElement>;
@@ -14,7 +15,16 @@ interface Props {
 }
 
 export const ThumbnailButton = memo(
-  ({ current, onSelect, page, ref, size, src, unavailableTip }: Props) => {
+  ({
+    current,
+    loading,
+    onSelect,
+    page,
+    ref,
+    size,
+    src,
+    unavailableTip,
+  }: Props) => {
     const onClick = () => onSelect(page);
     return (
       <button
@@ -29,14 +39,19 @@ export const ThumbnailButton = memo(
         ref={ref}
         type="button"
       >
-        <img
-          alt={`${page + 1}ページ`}
-          className={`block h-auto w-[140px] shadow-sm ${unavailableTip ? "thumb-unavailable" : "bg-white"}`}
-          height={Math.round((THUMB_WIDTH * size.height) / size.width)}
-          src={src ?? undefined}
-          style={{ aspectRatio: `${size.width} / ${size.height}` }}
-          width={THUMB_WIDTH}
-        />
+        <span className="relative block">
+          <img
+            alt={`${page + 1}ページ`}
+            className={`block h-auto w-[140px] shadow-sm ${unavailableTip ? "thumb-unavailable" : "bg-white"}`}
+            height={Math.round((THUMB_WIDTH * size.height) / size.width)}
+            src={src ?? undefined}
+            style={{ aspectRatio: `${size.width} / ${size.height}` }}
+            width={THUMB_WIDTH}
+          />
+          {src === null && loading ? (
+            <span className="loading loading-spinner loading-sm absolute inset-0 m-auto text-primary" />
+          ) : null}
+        </span>
         <span>{page + 1}</span>
       </button>
     );

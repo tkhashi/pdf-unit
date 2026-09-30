@@ -1,6 +1,7 @@
 // ページの表示: 線データを取得してモデルを作り、描画資源(Path2D・埋め込み画像の範囲)を用意する
 import { flushSync } from "react-dom";
 import { buildPageModel } from "../domain/page-model";
+import { computeProgress } from "../domain/progress";
 import type { LinesResponse } from "../domain/types";
 import { viewportSize } from "../render/dom";
 import { preparePageResources } from "../render/resources";
@@ -10,6 +11,9 @@ import type { ControllerContext } from "./context";
 
 // 表示中のページの線データの要求。次のページを要求したら取り消す
 const linesRequests = new WeakMap<ControllerContext, AbortController>();
+
+/** 擬似プログレスバーを更新する間隔(ms) */
+const PROGRESS_TICK_MS = 100;
 
 const errorMessage = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
@@ -33,8 +37,17 @@ export const showPage = async (
     })
   );
   const {
-    page: { request },
+    page: { progress, request },
   } = app.getState();
+  const estimateMs = progress?.estimateMs ?? 0;
+  const t0 = performance.now();
+  const tick = window.setInterval(() => {
+    const { ratio, stageIndex } = computeProgress(
+      performance.now() - t0,
+      estimateMs
+    );
+    app.dispatch({ ratio, request, stageIndex, type: "pageProgressTicked" });
+  }, PROGRESS_TICK_MS);
   linesRequests.get(ctx)?.abort();
   const abort = new AbortController();
   linesRequests.set(ctx, abort);
@@ -51,7 +64,12 @@ export const showPage = async (
     }
     return;
   } finally {
-    app.dispatch({ request, type: "pageLoadSettled" });
+    window.clearInterval(tick);
+    app.dispatch({
+      durationMs: performance.now() - t0,
+      request,
+      type: "pageLoadSettled",
+    });
   }
   if (request !== app.getState().page.request) {
     return;

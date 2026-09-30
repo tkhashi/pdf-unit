@@ -41,8 +41,39 @@ describe("ページの読み込み", () => {
       next
     );
     expect(
-      run([{ request: 2, type: "pageLoadSettled" }], next).page.loading
+      run([{ durationMs: 10, request: 2, type: "pageLoadSettled" }], next).page
+        .loading
     ).toBe(false);
+  });
+
+  it("完了すると進捗をクリアし、実測時間を次回の見積もりに残す", () => {
+    const settled = run(
+      [{ durationMs: 1234, request: 1, type: "pageLoadSettled" }],
+      opened
+    );
+    expect(settled.page.progress).toBeNull();
+    expect(settled.lastPageDurationMs).toBe(1234);
+  });
+
+  it("進捗の更新は現在の要求のものだけ反映する", () => {
+    const ticked = run(
+      [{ ratio: 0.5, request: 1, stageIndex: 2, type: "pageProgressTicked" }],
+      opened
+    );
+    expect(ticked.page.progress).toMatchObject({ ratio: 0.5, stageIndex: 2 });
+    expect(
+      run(
+        [
+          {
+            ratio: 0.9,
+            request: 999,
+            stageIndex: 5,
+            type: "pageProgressTicked",
+          },
+        ],
+        opened
+      )
+    ).toBe(opened);
   });
 
   it("サーバーのページ寸法と食い違えば合わせて全体表示し直す", () => {
@@ -168,6 +199,21 @@ describe("サムネイル", () => {
       ],
       loaded
     );
-    expect(s.thumbs.entries).toEqual([{ src: "x", unavailableTip: null }]);
+    expect(s.thumbs.entries).toEqual([
+      { loading: false, src: "x", unavailableTip: null },
+    ]);
+  });
+
+  it("要求すると読み込み中になり、応答が来ると解除する", () => {
+    const requested = run(
+      [{ docId: 1, page: 0, type: "thumbRequested" }],
+      loaded
+    );
+    expect(requested.thumbs.entries[0]).toMatchObject({ loading: true });
+    const done = run(
+      [{ docId: 1, thumbs: [{ page: 0, src: "x" }], type: "thumbsLoaded" }],
+      requested
+    );
+    expect(done.thumbs.entries[0]).toMatchObject({ loading: false });
   });
 });

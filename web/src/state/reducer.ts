@@ -2,6 +2,7 @@
 import { ITEM_TYPES, type ItemType } from "../domain/constants";
 import { calibrationStatus, plainStatus } from "../domain/messages";
 import { EMPTY_PAGE_MODEL } from "../domain/page-model";
+import { estimateDurationMs } from "../domain/progress";
 import { filterSelection, selectNext } from "../domain/selection";
 import { fitView } from "../domain/view";
 import { hiddenPredicate, type Visibility } from "../domain/visibility";
@@ -17,7 +18,11 @@ type Handler<T extends Action["type"]> = (
   a: Extract<Action, { type: T }>
 ) => AppState;
 
-const EMPTY_THUMB: ThumbEntry = { src: null, unavailableTip: null };
+const EMPTY_THUMB: ThumbEntry = {
+  loading: false,
+  src: null,
+  unavailableTip: null,
+};
 
 /** 表示対象が変わったら、見えなくなった要素を選択・ホバーから外す */
 const withVisibility = (s: AppState, visibility: Visibility): AppState => ({
@@ -65,6 +70,11 @@ const pageRequested: Handler<"pageRequested"> = (s, a) => {
       index: a.index,
       loading: true,
       model: EMPTY_PAGE_MODEL,
+      progress: {
+        estimateMs: estimateDurationMs(s.lastPageDurationMs),
+        ratio: 0,
+        stageIndex: 0,
+      },
       request: s.page.request + 1,
     },
     selection: null,
@@ -73,9 +83,28 @@ const pageRequested: Handler<"pageRequested"> = (s, a) => {
   };
 };
 
+const pageProgressTicked: Handler<"pageProgressTicked"> = (s, a) =>
+  a.request === s.page.request && s.page.progress
+    ? {
+        ...s,
+        page: {
+          ...s.page,
+          progress: {
+            ...s.page.progress,
+            ratio: a.ratio,
+            stageIndex: a.stageIndex,
+          },
+        },
+      }
+    : s;
+
 const pageLoadSettled: Handler<"pageLoadSettled"> = (s, a) =>
   a.request === s.page.request
-    ? { ...s, page: { ...s.page, loading: false } }
+    ? {
+        ...s,
+        lastPageDurationMs: a.durationMs,
+        page: { ...s.page, loading: false, progress: null },
+      }
     : s;
 
 // 座標系の基準はサーバー(PDFium)の寸法。pdf-libで求めた寸法と食い違えば合わせる
@@ -174,6 +203,18 @@ const originalImageFailed: Handler<"originalImageFailed"> = (s, a) =>
     ? { ...s, originalImage: { ...s.originalImage, requestedRes: 0 } }
     : s;
 
+const thumbRequested: Handler<"thumbRequested"> = (s, a) => {
+  const entry = s.thumbs.entries[a.page];
+  if (!(isCurrentDoc(s, a.docId) && entry) || entry.loading) {
+    return s;
+  }
+  const entries = replaceAt(s.thumbs.entries, a.page, {
+    ...entry,
+    loading: true,
+  });
+  return { ...s, thumbs: { ...s.thumbs, entries } };
+};
+
 const thumbsLoaded: Handler<"thumbsLoaded"> = (s, a) => {
   if (!isCurrentDoc(s, a.docId)) {
     return s;
@@ -181,7 +222,7 @@ const thumbsLoaded: Handler<"thumbsLoaded"> = (s, a) => {
   const loaded = new Map(a.thumbs.map((t) => [t.page, t.src]));
   const entries = s.thumbs.entries.map((e, i) => {
     const src = loaded.get(i);
-    return src === undefined ? e : { ...e, src };
+    return src === undefined ? e : { ...e, loading: false, src };
   });
   return { ...s, thumbs: { ...s.thumbs, entries } };
 };
@@ -193,6 +234,7 @@ const thumbUnavailable: Handler<"thumbUnavailable"> = (s, a) => {
   }
   const entries = replaceAt(s.thumbs.entries, a.page, {
     ...entry,
+    loading: false,
     unavailableTip: a.tip,
   });
   return { ...s, thumbs: { ...s.thumbs, entries } };
@@ -215,11 +257,13 @@ const handlers: { readonly [T in Action["type"]]: Handler<T> } = {
   pageFailed,
   pageLoaded,
   pageLoadSettled,
+  pageProgressTicked,
   pageRequested,
   pageSizeReported,
   rasterOpacityChanged: (s, a) => ({ ...s, rasterOpacity: a.value }),
   selectionCleared: (s) => (s.selection ? { ...s, selection: null } : s),
   statusChanged: (s, a) => ({ ...s, status: a.status }),
+  thumbRequested,
   thumbsLoaded,
   thumbsVisibilityChanged: (s, a) => ({
     ...s,

@@ -57,6 +57,7 @@ export const createThumbnailScheduler = (
     width: number,
     priority: number
   ): Promise<void> => {
+    app.dispatch({ docId: target.id, page, type: "thumbRequested" });
     try {
       const source = await target.thumbSource;
       const src = await renderThumb(source, page, width, priority);
