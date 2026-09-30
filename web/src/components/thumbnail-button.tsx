@@ -4,7 +4,6 @@ import type { PageSize } from "../domain/types";
 
 interface Props {
   readonly current: boolean;
-  readonly loading: boolean;
   readonly onSelect: (page: number) => void;
   readonly page: number;
   readonly ref: Ref<HTMLButtonElement>;
@@ -15,16 +14,7 @@ interface Props {
 }
 
 export const ThumbnailButton = memo(
-  ({
-    current,
-    loading,
-    onSelect,
-    page,
-    ref,
-    size,
-    src,
-    unavailableTip,
-  }: Props) => {
+  ({ current, onSelect, page, ref, size, src, unavailableTip }: Props) => {
     const onClick = () => onSelect(page);
     return (
       <button
@@ -48,7 +38,7 @@ export const ThumbnailButton = memo(
             style={{ aspectRatio: `${size.width} / ${size.height}` }}
             width={THUMB_WIDTH}
           />
-          {src === null && loading ? (
+          {src === null && !unavailableTip ? (
             <span className="loading loading-spinner loading-sm absolute inset-0 m-auto text-primary" />
           ) : null}
         </span>

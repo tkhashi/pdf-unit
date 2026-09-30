@@ -29,6 +29,7 @@ export type Action =
       readonly stageIndex: number;
       readonly type: "pageProgressTicked";
     }
+  | { readonly request: number; readonly type: "pageProgressCleared" }
   | {
       /** サーバー(PDFium)が返したページ寸法(座標系の基準) */
       readonly pageSize: PageSize;
@@ -80,11 +81,6 @@ export type Action =
       readonly type: "originalImageFailed";
     }
   | { readonly type: "thumbsVisibilityChanged"; readonly visible: boolean }
-  | {
-      readonly docId: number;
-      readonly page: number;
-      readonly type: "thumbRequested";
-    }
   | {
       readonly docId: number;
       readonly thumbs: readonly {

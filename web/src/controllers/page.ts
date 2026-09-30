@@ -1,5 +1,6 @@
 // ページの表示: 線データを取得してモデルを作り、描画資源(Path2D・埋め込み画像の範囲)を用意する
 import { flushSync } from "react-dom";
+import { PROGRESS_HOLD_MS } from "../domain/constants";
 import { buildPageModel } from "../domain/page-model";
 import { computeProgress } from "../domain/progress";
 import type { LinesResponse } from "../domain/types";
@@ -7,6 +8,7 @@ import { viewportSize } from "../render/dom";
 import { preparePageResources } from "../render/resources";
 import { apiPost } from "../services/api";
 import { perfMark, perfStart } from "../services/perf";
+import { sleep } from "../services/timing";
 import type { ControllerContext } from "./context";
 
 // 表示中のページの線データの要求。次のページを要求したら取り消す
@@ -39,12 +41,14 @@ export const showPage = async (
   const {
     page: { progress, request },
   } = app.getState();
-  const estimateMs = progress?.estimateMs ?? 0;
+  const primaryMs = progress?.primaryMs ?? 0;
+  const tailMs = progress?.tailMs ?? 0;
   const t0 = performance.now();
   const tick = window.setInterval(() => {
     const { ratio, stageIndex } = computeProgress(
       performance.now() - t0,
-      estimateMs
+      primaryMs,
+      tailMs
     );
     app.dispatch({ ratio, request, stageIndex, type: "pageProgressTicked" });
   }, PROGRESS_TICK_MS);
@@ -87,4 +91,7 @@ export const showPage = async (
   app.dispatch({ model, request, type: "pageLoaded" });
   // store の変更で予約された描画と同じフレームの後に呼ばれる
   requestAnimationFrame(() => perfMark(n, "初回描画完了"));
+  // 100%表示を一瞬見せてから消す。ページが切り替わっていれば request 不一致で無視される
+  await sleep(PROGRESS_HOLD_MS);
+  app.dispatch({ request, type: "pageProgressCleared" });
 };

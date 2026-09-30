@@ -60,3 +60,5 @@ export const THUMB_WIDTH = 140;
 export const THUMB_MAX_WIDTH = 400;
 export const TIP_DELAY_MS = 250;
 export const DEFAULT_RASTER_OPACITY = 20;
+/** 解析完了(擬似プログレスバーの100%表示)からバーを消すまでの一瞬の間(ms) */
+export const PROGRESS_HOLD_MS = 150;

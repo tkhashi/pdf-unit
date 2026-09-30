@@ -28,7 +28,6 @@ const ThumbnailItemContainer = ({ page }: { readonly page: number }) => {
   return (
     <ThumbnailButton
       current={current}
-      loading={entry.loading}
       onSelect={actions.showPage}
       page={page}
       ref={ref}

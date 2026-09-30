@@ -19,10 +19,12 @@ export interface DocState {
 
 /** 解析中の擬似プログレスバーの表示状態(実際の処理段階とは連動しない) */
 export interface PageProgress {
-  /** 段階配分に使う見積もり時間(ms) */
-  readonly estimateMs: number;
+  /** 最初の5段階に均等配分する合計見積もり時間(ms)。通信オーバーヘッドは含まない */
+  readonly primaryMs: number;
   readonly ratio: number;
   readonly stageIndex: number;
+  /** 最後の段階(解析結果まとめ)の見積もり時間(ms)。通信オーバーヘッドを含む */
+  readonly tailMs: number;
 }
 
 export interface PageState {
@@ -46,8 +48,6 @@ export interface OriginalImageState {
 }
 
 export interface ThumbEntry {
-  /** 読み込み(ブラウザ内でのラスタライズ)を要求中 */
-  readonly loading: boolean;
   readonly src: string | null;
   /** 大きすぎて表示できない場合の補足 */
   readonly unavailableTip: string | null;

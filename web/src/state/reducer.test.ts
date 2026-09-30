@@ -46,13 +46,27 @@ describe("ページの読み込み", () => {
     ).toBe(false);
   });
 
-  it("完了すると進捗をクリアし、実測時間を次回の見積もりに残す", () => {
+  it("応答受信では進捗を変えず、実測時間だけ次回の見積もりに残す", () => {
     const settled = run(
       [{ durationMs: 1234, request: 1, type: "pageLoadSettled" }],
       opened
     );
-    expect(settled.page.progress).toBeNull();
+    expect(settled.page.progress).not.toBeNull();
     expect(settled.lastPageDurationMs).toBe(1234);
+  });
+
+  it("成功すると進捗を100%にし、少し後に消す", () => {
+    expect(loaded.page.progress).toMatchObject({ ratio: 1, stageIndex: 5 });
+    const cleared = run([{ request: 1, type: "pageProgressCleared" }], loaded);
+    expect(cleared.page.progress).toBeNull();
+  });
+
+  it("失敗すると進捗を即座に消す", () => {
+    const failed = run(
+      [{ message: "x", request: 1, type: "pageFailed" }],
+      opened
+    );
+    expect(failed.page.progress).toBeNull();
   });
 
   it("進捗の更新は現在の要求のものだけ反映する", () => {
@@ -199,21 +213,6 @@ describe("サムネイル", () => {
       ],
       loaded
     );
-    expect(s.thumbs.entries).toEqual([
-      { loading: false, src: "x", unavailableTip: null },
-    ]);
-  });
-
-  it("要求すると読み込み中になり、応答が来ると解除する", () => {
-    const requested = run(
-      [{ docId: 1, page: 0, type: "thumbRequested" }],
-      loaded
-    );
-    expect(requested.thumbs.entries[0]).toMatchObject({ loading: true });
-    const done = run(
-      [{ docId: 1, thumbs: [{ page: 0, src: "x" }], type: "thumbsLoaded" }],
-      requested
-    );
-    expect(done.thumbs.entries[0]).toMatchObject({ loading: false });
+    expect(s.thumbs.entries).toEqual([{ src: "x", unavailableTip: null }]);
   });
 });
