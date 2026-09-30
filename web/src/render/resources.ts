@@ -13,6 +13,8 @@ export interface StrokeBatch {
 }
 
 export interface PageResources {
+  /** 塗りつぶしに掛かるクリップの Path2D(PageModel.clipPaths と同じ並び) */
+  readonly clipPaths: readonly Path2D[];
   /** 埋め込み画像の範囲(全画像の四隅を1つにまとめたもの。画像が無ければ null) */
   readonly imageRegions: Path2D | null;
   /** 線・塗りつぶしの要素ごとの Path2D(文字・画像は undefined) */
@@ -84,6 +86,7 @@ export const preparePageResources = (model: PageModel): PageResources => {
     isArea(it) && !isFill(it) ? undefined : new Path2D(it.d)
   );
   const resources = {
+    clipPaths: model.clipPaths.map((c) => new Path2D(c.d)),
     imageRegions: imageRegionsOf(model.items),
     paths,
     strokeBatches: batchStrokes(model.items, paths).strokes,
@@ -93,6 +96,7 @@ export const preparePageResources = (model: PageModel): PageResources => {
 };
 
 const EMPTY_RESOURCES: PageResources = {
+  clipPaths: [],
   imageRegions: null,
   paths: [],
   strokeBatches: [],

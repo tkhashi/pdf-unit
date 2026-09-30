@@ -1,7 +1,13 @@
 // 表示・判定に使う要素(線・塗りつぶし・文字・画像)。サーバーの応答に通し番号と計算済みの値を加えたもの
 import type { AreaType, ItemType, StrokeType } from "./constants";
 import type { ShapeDescriptor } from "./shape";
-import type { FillRecord, ImageRecord, LineRecord, TextRecord } from "./types";
+import type {
+  ClipPathRecord,
+  FillRecord,
+  ImageRecord,
+  LineRecord,
+  TextRecord,
+} from "./types";
 
 export interface StrokeItem extends LineRecord {
   /** line の長さ(pt)。折れ線群の線分の長さの合計 */
@@ -13,6 +19,8 @@ export interface StrokeItem extends LineRecord {
 }
 
 export interface FillItem extends FillRecord {
+  /** 掛かるクリップ(clip の順。ページのクリップを参照で共有する) */
+  readonly clipPaths: readonly ClipPathRecord[];
   readonly id: number;
 }
 

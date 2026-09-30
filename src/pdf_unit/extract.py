@@ -35,7 +35,13 @@ class FillRecord(TypedDict):
     fill_rule: str  # "nonzero" | "evenodd"(SVG・Canvas の fill-rule と同じ名前)
     linewidth: float | None  # 塗るときに残っていた線幅(描画時の CTM で換算。線としては描かれない)
     color: str | None  # 塗りの色
-    bbox: tuple[float, float, float, float]  # x0, top, x1, bottom
+    bbox: tuple[float, float, float, float]  # x0, top, x1, bottom(クリップする前の範囲)
+    clip: list[int]  # 掛かるクリップ(ClipPathRecord の添字)。塗られるのは範囲とすべてのクリップの共通部分
+
+
+class ClipPathRecord(TypedDict):
+    d: str  # SVG path data(空文字列は何も見えない範囲)
+    polylines: list[list[float]]  # ヒット判定用の閉じた折れ線群(規則は非ゼロ回転数とみなす)
 
 
 def _clamp255(v: float) -> int:
@@ -172,13 +178,21 @@ def extract_page_lines(page: PdfiumPage) -> list[LineRecord]:
     return records
 
 
+def _closed_polylines(path: list[Any]) -> list[list[tuple[float, float]]]:
+    """塗り・クリップでは開いたサブパスも閉じて扱われるので、折れ線も始点へ戻して閉じる。"""
+    return [p if p[0] == p[-1] else [*p, p[0]] for p in _flatten_commands(path)]
+
+
+def _flat(polys: list[list[tuple[float, float]]]) -> list[list[float]]:
+    return [[round(v, 2) for pt in poly for v in pt] for poly in polys]
+
+
 def extract_page_fills(page: PdfiumPage) -> list[FillRecord]:
     """線を描かない塗りだけでなく、線と塗りの両方を行うパスの塗りも含む(ADR 0044)。"""
     records: list[FillRecord] = []
     for obj in page.fills:
         d = _path_from_commands(obj["path"])
-        # 塗りでは開いたサブパスも閉じて塗られるので、折れ線も始点へ戻して閉じる
-        polys = [p if p[0] == p[-1] else [*p, p[0]] for p in _flatten_commands(obj["path"])]
+        polys = _closed_polylines(obj["path"])
         if d is None or not polys:
             continue
         xs = [x for p in polys for x, _ in p]
@@ -188,14 +202,23 @@ def extract_page_fills(page: PdfiumPage) -> list[FillRecord]:
                 "id": len(records),
                 "type": "fill",
                 "d": d,
-                "polylines": [[round(v, 2) for pt in poly for v in pt] for poly in polys],
+                "polylines": _flat(polys),
                 "fill_rule": obj["fill_rule"],
                 "linewidth": obj["linewidth"],
                 "color": _color_to_css(obj["non_stroking_color"]),
                 "bbox": (min(xs), min(ys), max(xs), max(ys)),
+                "clip": obj["clip"],
             }
         )
     return records
+
+
+def extract_clip_paths(page: PdfiumPage) -> list[ClipPathRecord]:
+    """塗りつぶしに掛かるクリップ。多数の図形が同じクリップを共有するので、塗りつぶしからは番号で参照する(ADR 0046)。"""
+    return [
+        {"d": _path_from_commands(list(path)) or "", "polylines": _flat(_closed_polylines(list(path)))}
+        for path in page.clip_paths
+    ]
 
 
 class CharGlyph(TypedDict):

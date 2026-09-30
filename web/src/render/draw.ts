@@ -111,6 +111,28 @@ const strokeImageFrames = (
   ctx.stroke(region);
 };
 
+// 塗りつぶしの描画(塗り・縁取り)は、原本と同じくクリップの内側だけに行う(ADR 0046)
+const withinClip = (
+  ctx: CanvasRenderingContext2D,
+  it: FillItem,
+  input: SceneInput,
+  draw: () => void
+): void => {
+  if (it.clip.length === 0) {
+    draw();
+    return;
+  }
+  ctx.save();
+  for (const c of it.clip) {
+    const clip = input.resources.clipPaths[c];
+    if (clip) {
+      ctx.clip(clip);
+    }
+  }
+  draw();
+  ctx.restore();
+};
+
 // 塗りつぶしは本来の色(白地を隠す白など)ではなく種類の色で、下が透ける濃さで塗る。
 // 塗りの規則は要素ごとに異なり、まとめると重なりの扱いが変わるため1件ずつ塗る(ADR 0044)
 const paintFill = (
@@ -120,7 +142,7 @@ const paintFill = (
 ): void => {
   const path = input.resources.paths[it.id];
   if (path) {
-    ctx.fill(path, it.fill_rule);
+    withinClip(ctx, it, input, () => ctx.fill(path, it.fill_rule));
   }
 };
 
@@ -156,7 +178,7 @@ const outlineFill = (
   ctx.strokeStyle = color;
   ctx.lineWidth =
     2 * highlightPad(input.view.scale, HL_PAD_MIN_PX, HL_PAD_MAX_PX);
-  ctx.stroke(path);
+  withinClip(ctx, it, input, () => ctx.stroke(path));
 };
 
 const strokeBatches = (

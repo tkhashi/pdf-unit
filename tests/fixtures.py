@@ -112,6 +112,11 @@ FIXTURES: dict[str, dict] = {
         b"110 110 m 140 110 l 140 140 l 110 140 l h f* "  # 偶奇規則。穴のある1つの範囲
         b"0 1 0 RG 0 1 0 rg 60 120 20 20 re B"  # 線と塗りの両方
     )),
+    "fill_clips": dict(content=(
+        b"q 2 0 0 2 0 0 cm 5 5 10 10 re W n 0 0 m 50 0 l 50 50 l h f Q "  # CTM を掛けた範囲でクリップ
+        b"q 0 0 60 100 re W n q 2 0 0 2 10 10 cm /Fx Do Q Q "  # フォームに掛かるクリップ + フォーム内のクリップ
+        b"10 150 20 20 re f"  # クリップなし
+    ), form=(b"5 5 10 10 re W n 0 0 m 50 0 l 50 50 l h f", (0.5, 0, 0, 0.5, 20, 20))),
     "form_q": dict(content=b"q 2 0 0 2 10 10 cm /Fx Do Q 1 w 5 5 m 20 5 l S",
                    form=(_FORM_BODY, (0.5, 0, 0, 0.5, 20, 20))),
     "text_matrix": dict(content=(

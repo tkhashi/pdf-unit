@@ -85,7 +85,9 @@ describe("属性パネル", () => {
     ]);
     expect(fill[1]?.value).toEqual({ kind: "plain", text: "2.5" });
     // 線とは別の種類として巡回する(同じ線幅の線を含めない)
-    expect(cycle(6)).toEqual(["種類=fill:6"]);
+    expect(cycle(6)).toEqual(["種類=fill:6,7", "線幅=2.5:6"]);
+    const clipped = describeItem(m.items, item(7), null, m.lwScale);
+    expect(clipped.map((r) => r.label)).toContain("クリップ");
   });
 
   it("文字・画像の行", () => {

@@ -168,7 +168,7 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 
 - **座標系**: ページの表示範囲(CropBox と MediaBox の交わり。PDFium の描画範囲と同じ)の左上を原点とし、ページ回転 `/Rotate` を反映した pt に統一しています。線・文字・埋め込み画像・原本画像はすべてこの座標系で一致します。PDFium の API が返す float32 の値は「float32 として同じ値になる最短の10進数」に戻してから計算し、PDF に書かれた数値(有効数字7桁まで)を再現します
 - **図形**: パスをサブパスごとに分け、線分1本(`m l`)は line、軸に平行な閉じた四角形は rect、それ以外は curve とします(pdfminer.six と同じ規則)。`v`/`y` 演算子の曲線もベジェとして保持します。線幅は描画時の座標変換の拡大率を掛けた太さ、色は PDFium が色空間(Separation・ICC 等を含む)を RGB に変換した値です
-- **塗りつぶし**: 塗るパス(`f`・`f*`・`B`・`b` 等)の塗りの範囲を、パスごとに1件の fill とします。塗りの規則(非ゼロ回転数 / 偶奇)はパス全体にかかるので、サブパスには分けません。塗るだけで線を描かないパス(`f`・`f*`)は line・rect・curve にせず、線幅補正の実測にも使いません。線と塗りの両方を行うパス(`B` 等)は、線(line・rect・curve)と fill の両方になります([ADR 0044](docs/adr/0044-fill-regions.md))
+- **塗りつぶし**: 塗るパス(`f`・`f*`・`B`・`b` 等)の塗りの範囲を、パスごとに1件の fill とします。塗りの規則(非ゼロ回転数 / 偶奇)はパス全体にかかるので、サブパスには分けません。塗るだけで線を描かないパス(`f`・`f*`)は line・rect・curve にせず、線幅補正の実測にも使いません。線と塗りの両方を行うパス(`B` 等)は、線(line・rect・curve)と fill の両方になります([ADR 0044](docs/adr/0044-fill-regions.md))。塗りにクリップパス(`W`・`W*`。外側の Form XObject に掛かるものを含む)が掛かっている場合は、原本と同じくクリップの内側だけを塗り、ホバーもクリップの内側だけで選ばれます。属性パネルには「クリップ: あり」と表示します。bbox はクリップする前の範囲です([ADR 0046](docs/adr/0046-fill-clip-paths.md))
 - **線幅補正**: 線幅が実際の描画太さと一致しないPDFに備え、原本画像での実測値との比を補正係数として使います(ClassifierArchDrawingByJev の `calibration.py` を移植)。実測に使うのはほかの図形と重ならない孤立した直線で、孤立の判定は格子状の空間索引で近くの図形だけを調べます(結果は総当たりと同じ。[ADR 0025](docs/adr/0025-calibration-spatial-index.md))。ヘッダーには「線幅補正 ×0.18」のように係数を表示し、算出できなかった場合(補正なし)は「線幅補正 -」と表示します。算出方法はマウスオーバーで補足します
 - **文字**:
   - 単語単位にまとめ、フォント・サイズ・色が変わる箇所で区切ります(pdfplumber の `extract_words` を `src/pdf_unit/_vendor/` に取り込んで使っています)
@@ -190,7 +190,7 @@ PDF の読み取りは PDFium(pypdfium2)で行います。抽出処理は、PDFi
 | メソッド | パス | 内容 |
 | --- | --- | --- |
 | GET | `/` | UI(ビルドした `static/index.html`。未ビルドなら 503) |
-| POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, fills, texts, images}`。`fills` の各要素は `{id, type: "fill", d, polylines, fill_rule, linewidth, color, bbox}`(`fill_rule` は `nonzero` / `evenodd`、`color` は塗り色) |
+| POST | `/api/page/lines` | 抽出結果。`{page: {width, height}, linewidth_scale, calibration, lines, fills, clip_paths, texts, images}`。`fills` の各要素は `{id, type: "fill", d, polylines, fill_rule, linewidth, color, bbox, clip}`(`fill_rule` は `nonzero` / `evenodd`、`color` は塗り色、`clip` は掛かるクリップの `clip_paths` の添字。塗られるのはすべてのクリップとの共通部分)。`clip_paths` の各要素は `{d, polylines}`(表示座標。同じクリップは1つにまとめる) |
 | POST | `/api/page/image?resolution=` | 原本画像(36〜600dpi)。`{resolution, png_base64}`(`resolution` は実際の解像度) |
 | GET | `/assets/*` | UI のスクリプト・スタイル(`static/assets/` を配信。`index.html` からは相対パス `assets/` で参照。ファイル名にハッシュを含む) |
 | GET | `/licenses.md` | UI に同梱したライブラリ(pdf-lib・React 等)のライセンス(ビルド時に生成) |
@@ -291,3 +291,5 @@ docs/adr/          設計判断の記録
 - 最初に文書を開くとき、ステータス欄は文書を開くまで表示されないため、「読み込み中...」や読み込みエラーは画面に出ません(2つ目以降の文書では表示されます)
 - 同じファイルを続けて「開く」から選び直しても反応しません。図面表示領域の外へPDFをドロップすると、ブラウザがそのPDFを開きます
 - 原本画像は、応答サイズの上限により要求より低い解像度になる場合があります(拡大時に粗く見えることがあります)
+- クリップを考慮するのは塗りつぶし(fill)だけです。線(line・rect・curve)は、クリップの外にはみ出す部分も表示します。また、PDFium はクリップの塗りの規則(`W` と `W*`)を返さないため、すべて非ゼロ回転数とみなします。文字によるクリップ(文字の描画モード 4〜7)は考慮しません(ADR 0046)
+- グラデーションを多数の塗りの重ね塗りで表したPDFでは、半透明の塗りが重なって濃く表示されます

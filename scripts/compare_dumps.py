@@ -85,6 +85,7 @@ def compare_lines(a: dict, b: dict) -> dict:
               if a.get(k) != b.get(k)}
     report["lines"] = _items(a["lines"], b["lines"])
     report["fills"] = _items(a.get("fills", []), b.get("fills", []))  # 塗りつぶしは ADR 0044 で追加
+    report["clip_paths"] = _items(a.get("clip_paths", []), b.get("clip_paths", []))  # ADR 0046 で追加
     report["images"] = _items(a["images"], b["images"])
     report["texts"] = _texts(a["texts"], b["texts"])
     return report
@@ -95,7 +96,7 @@ def _print_lines(name: str, r: dict) -> None:
     for k in ("page", "linewidth_scale", "calibration"):
         if k in r:
             print(f"  {k}: {r[k]['before']} → {r[k]['after']}")
-    for k in ("lines", "fills", "images"):
+    for k in ("lines", "fills", "clip_paths", "images"):
         s = r[k]
         print(f"  {k}: 件数 {s['count'][0]} → {s['count'][1]}、完全一致 {s['identical']}")
         for key, v in sorted(s["keys"].items(), key=lambda kv: -kv[1]["diff"]):

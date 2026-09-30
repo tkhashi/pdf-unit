@@ -16,8 +16,9 @@ describe("ページのモデル", () => {
       "4:text",
       "5:image",
       "6:fill",
+      "7:fill",
     ]);
-    expect(m.counts).toEqual({ fill: 1, image: 1, line: 3, rect: 1, text: 1 });
+    expect(m.counts).toEqual({ fill: 2, image: 1, line: 3, rect: 1, text: 1 });
     const [first] = m.items;
     expect(first && "length" in first ? first.length : null).toBe(100);
     expect(first && "w" in first ? first.w : null).toBe(0.5);
@@ -50,6 +51,12 @@ describe("ヒット判定", () => {
     // 偶奇規則の穴の中央(縁から10pt)は範囲外
     expect(pick(m.items, m.index, 330, 50, 1, none)).toBe(-1);
     expect(pick(m.items, m.index, 310, 30, 1, (t) => t === "fill")).toBe(-1);
+  });
+
+  it("クリップの外(塗られない部分)では塗りつぶしを選ばない", () => {
+    expect(pick(m.items, m.index, 330, 115, 1, none)).toBe(7);
+    expect(pick(m.items, m.index, 330, 95, 1, none)).toBe(-1);
+    expect(pick(m.items, m.index, 330, 140, 1, none)).toBe(-1);
   });
 
   it("非表示の種類は選ばない。倍率で許容距離が変わる", () => {

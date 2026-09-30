@@ -92,6 +92,12 @@ const distToArea = (it: AreaItem, px: number, py: number): number => {
     return distToQuad(px, py, it.quad);
   }
   if (isFill(it)) {
+    // クリップの外は塗られないので選ばない(ADR 0046)
+    if (
+      !it.clipPaths.every((c) => inPolylines(px, py, c.polylines, "nonzero"))
+    ) {
+      return Number.POSITIVE_INFINITY;
+    }
     return inPolylines(px, py, it.polylines, it.fill_rule)
       ? 0
       : distToPolylines(px, py, it.polylines);
@@ -132,7 +138,7 @@ const scoreOf = (
  * 候補: 線の縁(描画太さ込み)まで許容距離以内。その中で中心線に最も近いものを選ぶ
  * (描画上重なって見える極細の密集線でも、中心線の近さで1本に決まる)。
  * 文字・画像・塗りつぶしは枠内でもペナルティを付け、重なる線を優先する(画像は四隅の多角形、
- * 塗りつぶしは塗りの範囲で判定)。
+ * 塗りつぶしは塗りの範囲で判定し、クリップの外は選ばない)。
  * 見つからなければ -1。
  */
 export const pick = (
